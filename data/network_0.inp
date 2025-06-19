@@ -1,0 +1,48 @@
+[TITLE]
+Water Network Model
+
+[JUNCTIONS]
+;ID               Elevation       Demand        Pattern
+J1                0              0             
+J2                0              0             
+J3                0              0             
+J4                0              0             
+J5                0              25             
+J6                0              25          
+
+[RESERVOIRS]
+;ID       Head
+Res1      30
+
+[COORDINATES]
+;ID       X-Coord   Y-Coord
+Res1      0         0
+J1        50        0
+J2        50        50
+J3        100       50
+J4        100       0
+J5        150       50
+J6        150       0      
+
+[PIPES]
+;ID       Node1   Node2   Length   Diameter   Roughness   MinorLoss   Status
+P1        Res1    J1      100      200        10        0          OPEN
+P2        J1      J2      100      200        10        0          OPEN
+P3        J1      J4      100      200        10        0          OPEN
+P4        J2      J3      100      200        10        0          OPEN
+P5        J2      J4      100      200        10        0          OPEN
+P6        J3      J4      100      200        10        0          OPEN
+P7        J3      J5      100      200        10        0          OPEN
+P8        J4      J6      100      200        10        0          OPEN
+
+[OPTIONS]
+Units           LPS
+Headloss        D-W
+Viscosity       1.0
+Trials          10
+Accuracy        0.001
+CHECKFREQ       2
+MAXCHECK        10
+DAMPLIMIT       0.0
+
+[END]

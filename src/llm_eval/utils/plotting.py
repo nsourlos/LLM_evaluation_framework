@@ -2,7 +2,11 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import matplotlib.colors as mcolors
+import pandas as pd
+import os
+import glob
 from .statistics import plot_metric_distributions, plot_question_scores
+from src.llm_eval.config import judge_model_2
 
 def plot_ordered_scores(metric_names, question_scores_by_metric, colors):
     """Plot metrics ordered by score values"""
@@ -444,3 +448,246 @@ def plot_and_save_model_comparisons(comparison_results, list_of_metrics, suffix)
 
     # Show plot after saving
     # plt.show()
+
+def create_performance_plots(save_dir, judge_model_2=judge_model_2):
+    """
+    Creates both a bar plot and radar chart showing LLM performance by model and task category.
+    Analyzes final_results*.xlsx files and groups them by task types.
+    Creates separate plots for each metric found in the data.
+    
+    Args:
+        save_dir (str): Directory containing the result files
+        judge_model_2 (str, optional): If specified, only processes files matching final_results_{judge_model_2}*.xlsx
+    """
+    
+    # Determine which Excel files to process based on judge_model_2
+    if judge_model_2:
+        # Extract judge name from judge_model_2 path (e.g., 'openai/gpt-4o-mini' -> 'gpt-4o-mini')
+        judge_name = '_'.join(judge_model_2.split('/')[1:])
+        pattern = f'final_results_{judge_name}*.xlsx'
+        excel_files = glob.glob(os.path.join(save_dir, pattern))
+        print(f"Looking for files matching pattern: {pattern}")
+    else:
+        # Process all final_results*.xlsx files
+        pattern = 'final_results*.xlsx'
+        excel_files = glob.glob(os.path.join(save_dir, pattern))
+        print(f"Looking for files matching pattern: {pattern}")
+    
+    if not excel_files:
+        print(f"No Excel files found matching pattern '{pattern}'")
+        return
+    
+    print(f"Found {len(excel_files)} files to process: {[os.path.basename(f) for f in excel_files]}")
+    
+    # Collect all available metrics from all files
+    all_metrics_dict = {}
+    
+    # First pass: collect all metrics from all files
+    for file in excel_files:
+        df = pd.read_excel(file)
+        metric_columns = [col for col in df.columns if col.startswith('metric_')]
+        print("Processing file:", file)
+        
+        # Group metric columns by base metric name and judge for this file
+        file_metrics = {}
+        for col in metric_columns:
+            # Split by underscores: metric_{metric_name}_{run_num}_{judge_id}
+            parts = col.split('_')
+            if len(parts) >= 3:
+                # Check if third part is a digit (run number)
+                if parts[2].isdigit():
+                    # Format: metric_{metric_name}_{run_num}
+                    if len(parts) == 3:
+                        # No judge suffix, default judge
+                        base_metric = f"metric_{parts[1]}"
+                        judge_id = "default"
+                    else:
+                        # Format: metric_{metric_name}_{run_num}_{judge_id}
+                        base_metric = f"metric_{parts[1]}"
+                        judge_id = '_'.join(parts[3:])
+                else:
+                    # Format: metric_{metric_name}_{judge_id}_{run_num} or other format
+                    # For this case, we'll assume it's metric_{metric_name} with everything else as suffix
+                    base_metric = f"metric_{parts[1]}"
+                    judge_id = '_'.join(parts[2:])
+            else:
+                # Fallback for unexpected format
+                base_metric = col
+                judge_id = "default"
+                
+            # Create unique key for metric + judge combination
+            metric_judge_key = f"{base_metric}_{judge_id}" if judge_id != "default" else base_metric
+            
+            if metric_judge_key not in file_metrics:
+                file_metrics[metric_judge_key] = []
+            file_metrics[metric_judge_key].append(col)
+        
+        # Add to global metrics collection
+        for metric_key, cols in file_metrics.items():
+            if metric_key not in all_metrics_dict:
+                all_metrics_dict[metric_key] = set()
+            all_metrics_dict[metric_key].update(cols)
+    
+    # Convert sets back to lists
+    for metric_key in all_metrics_dict:
+        all_metrics_dict[metric_key] = list(all_metrics_dict[metric_key])
+    
+    print(f"Found metrics across all files: {list(all_metrics_dict.keys())}")
+
+    # Create plots for each metric
+    for metric_judge_key, all_metric_cols in all_metrics_dict.items():
+        print(f"\nProcessing metric: {metric_judge_key}")
+        
+        # Initialize data structures for this metric
+        means = {}
+        stds = {}
+        models = []
+        
+        # Process each excel file
+        for file in excel_files:
+            # Extract model name from filename (part after 'with_')
+            if 'with_' in file:
+                model_name = file.split('with_')[1].replace('.xlsx', '')
+                if model_name not in models:
+                    models.append(model_name)
+                # Load the excel file
+                df_full = pd.read_excel(file)
+                
+                # Check which metric columns are available in this specific file
+                available_cols = [col for col in all_metric_cols if col in df_full.columns]
+                if not available_cols:
+                    print(f"Warning: No columns found for metric {metric_judge_key} in file {file}")
+                    continue
+                
+                # Average across runs for each row, then calculate statistics
+                avg_column_name = f'{metric_judge_key}_avg'
+                df_full[avg_column_name] = df_full[available_cols].mean(axis=1)               
+               
+                # Create different dataframes based on origin_file content
+                df_math = df_full[df_full['origin_file'].str.contains('math_reasoning', na=False)]
+                df_coding = df_full[df_full['origin_file'].str.contains('coding', na=False)]
+                # Other attributes (not math or coding)
+                df_retrieval = df_full[~df_full['origin_file'].str.contains('math_reasoning|coding', na=False)]
+                
+                # Calculate means for each category using averaged metric
+                score_column = avg_column_name
+                
+                # Calculate means with finite value checks
+                retrieval_mean = df_retrieval[score_column].mean() if not df_retrieval.empty else 0
+                coding_mean = df_coding[score_column].mean() if not df_coding.empty else 0
+                reasoning_mean = df_math[score_column].mean() if not df_math.empty else 0
+                all_mean = df_full[score_column].mean() if not df_full.empty else 0
+                
+                # Calculate standard deviations with finite value checks
+                retrieval_std = df_retrieval[score_column].std() if not df_retrieval.empty else 0
+                coding_std = df_coding[score_column].std() if not df_coding.empty else 0
+                reasoning_std = df_math[score_column].std() if not df_math.empty else 0
+                all_std = df_full[score_column].std() if not df_full.empty else 0
+                
+                means[model_name] = [retrieval_mean, coding_mean, reasoning_mean, all_mean]
+                stds[model_name] = [retrieval_std, coding_std, reasoning_std, all_std]
+        
+        if not means:
+            print(f"No data found for metric {metric_judge_key}")
+            continue
+
+        # Define tasks
+        tasks = ['Retrieval', 'Coding', 'Reasoning', 'All']
+        
+        # === BAR PLOT ===
+        n_models = len(models)
+        n_tasks = len(tasks)
+        bar_width = 0.12
+        x = np.arange(n_models) * 1.5  # Add more spacing between model groups
+        
+        fig, ax = plt.subplots(figsize=(12, 10))
+        
+        # Plot bars for each task (hue)
+        for j, task in enumerate(tasks):
+            vals = [means[model][j] for model in models]
+            errs = [stds[model][j] for model in models]
+            
+            # # Ensure all values are finite - some nan
+            vals = [v if np.isfinite(v) else 0 for v in vals]
+            errs = [e if np.isfinite(e) else 0 for e in errs]
+            
+            bars = ax.bar(x + j * bar_width, vals, bar_width, yerr=errs, capsize=5, label=task)
+            
+            # Add value labels above each error bar
+            for i, (val, err) in enumerate(zip(vals, errs)):
+                label_y = val + err + 0.05
+                if np.isfinite(label_y) and np.isfinite(val):
+                    ax.text(x[i] + j * bar_width, label_y, f'{val:.2f}', 
+                            ha='center', va='bottom', fontsize=8, rotation=90)
+        
+        # Labels and title
+        ax.set_xticks(x + (n_tasks - 1) * bar_width / 2)
+        ax.set_xticklabels(models, rotation=45, ha='right', fontsize=10)
+        ax.set_ylabel('Score (1–5)')
+        ax.set_ylim(0, 5.99)
+        metric_name = metric_judge_key.replace('metric_', '').replace('_', ' ').title()
+        ax.set_title(f'LLM Performance by Model and Task Category - Metric name: {metric_name}')
+        ax.legend(title='Task', bbox_to_anchor=(1.05, 1), loc='upper left')
+        
+        plt.tight_layout()
+        
+        # Save the bar plot
+        metric_safe_name = metric_judge_key.replace('metric_', '')
+        output_file = os.path.join(save_dir, f'llm_performance_by_model_metric_{metric_safe_name}.png')
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Bar plot saved as {output_file}")
+        
+        # === RADAR CHART ===
+        # Categories for radar (all tasks)
+        categories = tasks  # All tasks including 'All'
+        N = len(categories)
+        
+        # Angles for each axis
+        angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+        angles += angles[:1]
+        
+        # Get performance data from means dictionary (all tasks)
+        data = {}
+        for model in models:
+            # Ensure all values are finite
+            model_vals = [v if np.isfinite(v) else 0 for v in means[model]]
+            data[model] = model_vals
+        
+        # Initialize plot
+        fig, ax = plt.subplots(figsize=(12, 12), subplot_kw=dict(polar=True))
+        ax.set_theta_offset(np.pi / 2)
+        ax.set_theta_direction(-1)
+        
+        # Draw one axe per variable and add labels
+        plt.xticks(angles[:-1], categories, fontsize=12)
+        
+        # Draw y labels
+        ax.set_rlabel_position(0)
+        plt.yticks([1, 2, 3, 4, 5], ["1", "2", "3", "4", "5"], color="grey", size=8)
+        plt.ylim(1, 5)
+        
+        # Plot each model with a different marker
+        markers = ['o', 's', '^', 'D', 'v', 'p', '*', 'h', 'P', 'X', '+', 'x', '1', '2', '3', '4', '8', 'H', '<', '>', 'd']
+        # Cycle through markers if we have more models than markers
+        markers = markers * ((len(models) // len(markers)) + 1)
+        for (model, values), marker in zip(data.items(), markers):
+            vals = values + values[:1]  # repeat the first value to close the loop
+            # Double check all values are finite before plotting
+            vals = [v if np.isfinite(v) else 0 for v in vals]
+            ax.plot(angles, vals, linewidth=2, linestyle='solid', marker=marker, label=model)
+            ax.fill(angles, vals, alpha=0.1)
+        
+        # Add title and legend
+        plt.title(f'LLM Performance by Task Type - Metric name: {metric_name}', size=16, y=1.08)
+        plt.legend(bbox_to_anchor=(1.05, 1.0))
+        
+        plt.tight_layout()
+        
+        # Save the radar plot
+        output_file_radar = os.path.join(save_dir, f'llm_performance_radar_metric_{metric_safe_name}.png')
+        plt.savefig(output_file_radar, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Radar chart saved as {output_file_radar}")

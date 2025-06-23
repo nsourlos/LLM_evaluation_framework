@@ -65,7 +65,7 @@ from src.llm_eval.utils.statistics import (
     create_comparison_table
 ) 
 
-from src.llm_eval.utils.plotting import (plot_and_save_model_comparisons, plot_model_comparison, plot_spider_chart, plot_figures_metrics)
+from src.llm_eval.utils.plotting import (plot_and_save_model_comparisons, plot_model_comparison, plot_spider_chart, plot_figures_metrics, create_performance_plots)
 from src.llm_eval.utils.rag import get_similar_qa_pairs, rerank_retrieved_documents, check_context_relevance, format_context
 from src.llm_eval.tools.tool_usage import decide_tool_usage
 from src.llm_eval.providers.api_handlers import get_model_response
@@ -452,10 +452,20 @@ def main():
     torch.random.manual_seed(0) #Set for reproducibility
 
     test_command, test_process = run_python_script('compare_networks_test.py')
-    print("Command:", test_command)
-    stdout, stderr = test_process.communicate()
-    print("STDOUT:\n", stdout)
-    print("STDERR:\n", stderr)
+    try:
+        print("Command:", test_command)
+    except Exception as e:
+        print("Error running test_command:", e)
+        with open('error_test_command.txt', 'a', encoding='utf-8') as f:
+            f.write(f"Error running test_command: {test_command} \n {e}")
+    try:
+        stdout, stderr = test_process.communicate()
+        print("STDOUT:\n", stdout)
+        print("STDERR:\n", stderr)
+    except Exception as e:
+        print("Error running stdout and stderr:", e)
+        with open('error_stdout_stderr.txt', 'a', encoding='utf-8') as f:
+            f.write(f"Error running stdout: {stdout} \n and stderr: {stderr} \n {e}")
 
     #https://docs.smith.langchain.com/old/evaluation/faq/manage-datasets
     dataset_test = create_dataset_and_load(excel_file_name)
@@ -704,6 +714,7 @@ def main():
                     num_resamples=n_resamples,  
                     model_name=model_name,
                     judge_model_2=judge_model_2 if judge_model_2 else judge_model,
+                    tool_usage=tool_usage
                 )
 
                 excel_path=(f"results_{'_'.join(judge_model_2.split('/')[1:])}_judge_with_"
@@ -919,6 +930,8 @@ def main():
     print(f"Required samples per model for statistical power: {required_samples}")
 
     add_id_and_origin_file_columns('.', excel_file_name)
+
+    create_performance_plots('.', judge_model_2=judge_model_2)
 
 if __name__ == "__main__":
     main() 

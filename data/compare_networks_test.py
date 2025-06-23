@@ -60,4 +60,4 @@ def run(trial_file, benchmark_file):
   else:
       print("\n❌ Some unit tests failed. Differences were detected.")
 
-run('network_0.inp','benchmark.inp') #worked with 13GB RAM in Colab
+run('actual.inp','benchmark.inp') #worked with 13GB RAM in Colab

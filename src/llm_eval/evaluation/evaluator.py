@@ -13,7 +13,7 @@ from langsmith.schemas import Run, Example
 from termcolor import colored
 
 from ..config import (
-    max_output_tokens, judge_model,
+    max_output_tokens, judge_model, tool_usage,
     openai_api_key, gemini_api_key, together_api_key
 )
 from ..evaluation.prompts import (common_prompt, list_of_metrics, 
@@ -24,7 +24,7 @@ from ..utils.scoring import verify_numerical_outputs
 # https://docs.smith.langchain.com/old/evaluation/faq/custom-evaluators
 # https://docs.smith.langchain.com/how_to_guides/evaluation/evaluate_llm_application#use-a-summary-evaluator
 #Function that compares the real answer with the predicted answer of an LLM and returns a score based on the evaluation
-def factor_evaluator(run: Run, example: Example, judge_model=judge_model, max_output_tokens=max_output_tokens) -> dict: #Cannot use model_name as input
+def factor_evaluator(run: Run, example: Example, judge_model=judge_model, max_output_tokens=max_output_tokens, tool_usage=tool_usage) -> dict: #Cannot use model_name as input
     # print("Run:",run)
 
     question = run.inputs.get("inputs")['question']
@@ -215,7 +215,7 @@ def factor_evaluator(run: Run, example: Example, judge_model=judge_model, max_ou
                     score = int(ai_response.content.split("FINAL SCORE:")[1])
                 except: #If more text after it due to e.g. thinking => 'FINAL SCORE:5 is not appropriate...' - If fix this by matching the last one, other errors might occur
                     with open(f"final_score_log.txt", "a", encoding="utf-8") as log:
-                        log.write(f"More text after FINAL SCORE, possible due to thinking.\n")
+                        log.write(f"More text after FINAL SCORE, possibly due to thinking.\n")
                         log.write(f"{ai_response.content}\n\n")
                         log.write(f"--------------------------------\n\n")
                     try:
@@ -267,11 +267,12 @@ def factor_evaluator(run: Run, example: Example, judge_model=judge_model, max_ou
                         log.write(f"--------------------------------\n\n")
 
                     # Verify numerical outputs if we successfully extracted dictionaries
-                    if predicted_dict and actual_dict:
-                        test_score = verify_numerical_outputs(actual_dict, predicted_dict, tol=0.01)
-                        with open(f"test_score_log_{judge_log_name}.txt", "a", encoding="utf-8") as log:
-                            log.write(f"Score set from {score} to {test_score} for predicted answer {predicted_answer.strip()} \n \n")  
-                        score = test_score
+                    if tool_usage==True:
+                        if predicted_dict and actual_dict:
+                            test_score = verify_numerical_outputs(actual_dict, predicted_dict, tol=0.01)
+                            with open(f"test_score_log_{judge_log_name}.txt", "a", encoding="utf-8") as log:
+                                log.write(f"Score set from {score} to {test_score} for predicted answer {predicted_answer.strip()} \n \n")  
+                            score = test_score
 
                 except Exception as e:
                     print("Error verifying numerical outputs:", str(e))
@@ -307,7 +308,7 @@ def factor_evaluator(run: Run, example: Example, judge_model=judge_model, max_ou
         ]
     }
 
-def apply_second_judge(input_excel, list_of_metrics, num_resamples, model_name, judge_model_2=judge_model, max_output_tokens=max_output_tokens):
+def apply_second_judge(input_excel, list_of_metrics, num_resamples, model_name, judge_model_2=judge_model, max_output_tokens=max_output_tokens, tool_usage=tool_usage):
     #Do not run this in parallel since it might cause issues with the responses
     """
     Applies the second judge model to all predictions in the Excel file, for all resamples and metrics.
@@ -349,14 +350,14 @@ def apply_second_judge(input_excel, list_of_metrics, num_resamples, model_name, 
                 example = type('Example', (), {})()
                 example.outputs = {"answer": row['answers']}
 
-                judge2_results = factor_evaluator(run, example, judge_model_2, max_output_tokens)
+                judge2_results = factor_evaluator(run, example, judge_model=judge_model_2, max_output_tokens=max_output_tokens, tool_usage=tool_usage)
                 #returns a dict with one key 'results' and a list with num_of_metrics dicts, each in the format below:
                 #{'results': [{'key': 'completeness', 'score': 5, 'value': "To evaluate...
                 
                 for result in judge2_results['results']:
                     metric = result['key']
                     with open(f"changed_scores_model_{'_'.join(model_name.split('/')[1:])}_judge_{'_'.join(judge_model_2.split('/')[1:])}.txt", "a", encoding="utf-8") as f:
-                        f.write(f"factor_evaluator_scores:{result['score']} set at index {idx} in col metric_{metric} for resample {resample_idx+1} and \
+                        f.write(f"factor_evaluator_scores: {result['score']} set at index {idx} in col metric_{metric} for resample {resample_idx+1} and \
                                 judge {'_'.join(judge_model_2.split('/')[1:])}\n\n")
                     df.at[idx, f"metric_{metric}_{resample_idx+1}_{judge_name}"] = result['score']
                     df.at[idx, f"prompt_{metric}_{resample_idx+1}_{judge_name}"] = result.get('value', '--')

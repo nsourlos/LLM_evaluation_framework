@@ -63,7 +63,13 @@ def call_groq_api(messages, model_name, generate_max_tokens, groq_api_key=groq_a
         )
         
         result = response.choices[0].message.content
-        print("Response from Groq:", result)
+        try:
+            print("Response from Groq:", result)
+        except Exception as e:
+            with open(f"warning_groq_{'_'.join(model_name.split('/')[1:])}.txt", "a", encoding='utf-8') as col_file:
+                col_file.write(f"Error in printing response from Groq: {e} \n")
+                col_file.write(f"Response: {result} \n")
+
         time.sleep(5)  # To avoid rate limit
         return result
     except Exception as e:
@@ -84,7 +90,13 @@ def call_anthropic_api(messages, model_name, generate_max_tokens, anthropic_api_
             max_tokens=generate_max_tokens,
         )
         result = response.content[0].text
-        print("Response from Anthropic:", result)
+        try:
+            print("Response from Anthropic:", result)
+        except Exception as e:
+            with open(f"warning_anthropic_{'_'.join(model_name.split('/')[1:])}.txt", "a", encoding='utf-8') as col_file:
+                col_file.write(f"Error in printing response from Anthropic: {e} \n")
+                col_file.write(f"Response: {result} \n")
+
         time.sleep(5)  # To avoid rate limit
         return result
     except Exception as e:
@@ -140,7 +152,13 @@ def call_openrouter_api(messages, model_name, generate_max_tokens, open_router_a
             max_tokens=generate_max_tokens,
         )
         result = response.choices[0].message.content
-        print("Response from OpenRouter:", result)
+        try:
+            print("Response from OpenRouter:", result)
+        except Exception as e:
+            with open(f"warning_openrouter_{'_'.join(model_name.split('/')[1:])}.txt", "a", encoding='utf-8') as col_file:
+                col_file.write(f"Error in printing response from OpenRouter: {e} \n")
+                col_file.write(f"Response: {result} \n")
+
         time.sleep(5)  # To avoid rate limit
         return result
     except Exception as e:
@@ -165,7 +183,13 @@ def call_gemini_api(messages, model_name, generate_max_tokens, gemini_api_key=ge
                 )
             )
             result = response.text
-            print("Response from Gemini ('thinking') model:", result)
+            try:
+                print("Response from Gemini ('thinking') model:", result)
+            except Exception as e:
+                with open(f"warning_gemini_{'_'.join(model_name.split('/')[1:])}.txt", "a", encoding='utf-8') as col_file:
+                    col_file.write(f"Error in printing response from Gemini ('thinking') model: {e} \n")
+                    col_file.write(f"Response: {result} \n")
+
             time.sleep(13)  # To avoid rate limit
             return result
         else:  # for the rest of the models
@@ -180,9 +204,15 @@ def call_gemini_api(messages, model_name, generate_max_tokens, gemini_api_key=ge
                     max_output_tokens=generate_max_tokens,
                 )
             )
-            print("Full response from Gemini model:", response)
             result = response.text
-            print("Response from Gemini:", result)
+            try:
+                print("Full response from Gemini model:", response)
+                print("Response from Gemini:", result)
+            except Exception as e:
+                with open(f"warning_gemini_{'_'.join(model_name.split('/')[1:])}.txt", "a", encoding='utf-8') as col_file:
+                    col_file.write(f"Error in printing full response from Gemini model: {e} \n")
+                    col_file.write(f"Response: {response} \n")
+
             time.sleep(10)  # To avoid rate limit
             return result
     except Exception as e:
@@ -195,7 +225,13 @@ def call_huggingface_api(messages, generation_args, model_name, commercial_api_p
     """Call HuggingFace local model"""
     model, tokenizer, pipeline = get_model(model_name, commercial_api_providers=commercial_api_providers)
     response = pipeline(messages, **generation_args)[0]['generated_text']
-    print("HF model", model_name, ':', response)
+    try:
+        print("HF model", model_name, ':', response)
+    except Exception as e:
+        with open(f"warning_huggingface_{'_'.join(model_name.split('/')[1:])}.txt", "a", encoding='utf-8') as col_file:
+            col_file.write(f"Error in printing response from HuggingFace: {e} \n")
+            col_file.write(f"Response: {response} \n")
+
     return response
 
 def get_model_response(messages, model_name, commercial_api_providers,  generation_args, generate_max_tokens,

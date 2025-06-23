@@ -9,7 +9,7 @@ reranker_model_name="BAAI/bge-reranker-base"
 #Model to generate responses to questions - If we restart session, comment out the models that have already been run
 models=[  #Example of models tested
     # "together/Qwen/Qwen3-235B-A22B-fp8-tput",
-    # 'together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
+    'together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
     # "together/deepseek-ai/DeepSeek-V3", #non-reasoning model
     # "openai/o3-2025-04-16", #200K context length, 100K output tokens
     # "openai/o4-mini", #200K context length, 100K output tokens

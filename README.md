@@ -148,6 +148,11 @@ The script will:
 - Create JSON files for statistics
 - Produce visualization plots
 
+**Important**: When re-evaluating a model, it's recommended to delete its previous run from Langsmith first. 
+For large datasets containing many question-answer pairs, we suggest evaluating models 
+sequentially - run the script one time for each model to ensure smooth execution. 
+Everytime, it will continue adding more models to the generated plots.
+
 ---
 
 ## 📁 Project Structure

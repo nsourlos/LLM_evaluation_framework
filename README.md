@@ -101,7 +101,7 @@ Edit [`src/llm_eval/utils/paths.py`](src/llm_eval/utils/paths.py) to set your sy
 
 ### ⚡ Parameters Configuration
 Edit [`src/llm_eval/config.py`](src/llm_eval/config.py) to configure:
-- `excel_file_name`: Your dataset Excel file
+- `excel_file_name`: Your dataset Excel file - This need to be added from the user
 - `embedding_model`: Model for RAG embeddings
 - `reranker_model_name`: Model for reranking
 - `models`: List of models to evaluate (e.g. OpenAI, Together, Gemini models)
@@ -188,8 +188,7 @@ llm_evaluation_framework/
 │   ├── network_0.inp                    # Input file for network comparison
 │   ├── network_test.inp                 # Input file for network testing scenarios
 │   ├── compare_networks_test.py         # Test script for network comparison functionality
-│   ├── compare_networks.py              # Main network comparison implementation
-│   └── DRACO.xlsx                       # Sample Excel dataset for evaluation
+│   └── compare_networks.py              # Main network comparison implementation
 ├── runpod/
 │   ├── README_runpod.md                # RunPod instructions
 │   └── runpod_initialize.ipynb         # Notebook that automatically initialize runpod and copies files to it

@@ -2,25 +2,20 @@ import pandas as pd
 import numpy as np
 from termcolor import colored
 import traceback
-from langsmith import Client
 
-from src.llm_eval.config import embedding_model, reranker_model_name, n_resamples, judge_model
+from src.llm_eval.config import embedding_model, reranker_model_name, n_resamples
 from .rag import initialize_vectorstore, initialize_reranker
 
-def process_evaluation_results(langsmith_api_key, dataset_langsmith, use_RAG=False):
+def process_evaluation_results(input_excel, use_RAG=False): #langsmith_api_key, dataset_langsmith,
     """Extract questions and answers from evaluation results."""
     #https://docs.smith.langchain.com/tutorials/Developers/evaluation
 
     # Get unique questions/answers
-    client = Client(api_key=langsmith_api_key)
-    questions_answers=[x for x in client.list_examples(dataset_id=dataset_langsmith.id)]
-    list_of_questions=[x.inputs['question'] for x in questions_answers]
-    list_of_answers=[x.outputs['answer'] for x in questions_answers]
-        
-    # with open('list_of_questions.txt', 'w') as f:
-    #     f.write(str(list_of_questions))
-    # with open('list_of_answers.txt', 'w') as f:
-    #     f.write(str(list_of_answers))
+    qa = pd.read_excel(input_excel)
+    # print("QA columns are:",qa.columns)
+    list_of_questions = qa['input'].tolist()
+    # print("List of questions is:",list_of_questions)
+    list_of_answers = qa['output'].tolist()
 
     if use_RAG==True:
         # Initialize vectorstore
@@ -38,171 +33,46 @@ def process_evaluation_results(langsmith_api_key, dataset_langsmith, use_RAG=Fal
     else:
         return results_df, list_of_questions, None, None
 
-def process_metrics(resample_results, list_of_metrics, list_of_questions, resample_idx, results_df, model_name, indices_to_reorder):
+def process_metrics(resample_results, list_of_metrics):
     """
     Process metrics for a single resample and update results DataFrame.
     
     Args:
         resample_results: Results from current resample
         list_of_metrics: List of metrics to process
-        resample_idx: Current resample index
-        results_df: DataFrame to update with metrics
-        model_name: Name of the model being evaluated
-        indices_to_reorder: Indices to reorder the metrics
         
     Returns:
-        individual_run_metric_scores, metrics, results_df
+        individual_run_metric_scores, evaluation_prompts
     """
 
-    metrics = [] #This should be the same as resample_results (list) except when there are 'traceback' errors where it will be 0.
-    # metrics format will be:[[EvaluationResult(key='completeness', score=4, value='To evaluate the .... - It has num_questions sublists, each with num_metrics values
-
-    model_parameter = "_".join(model_name.split('/')[1:])
-
-    for result in resample_results:
-        if result['run'].outputs['output'] is None or not result['evaluation_results']['results']: #or result['run'].error is not None - Same as first condition
-            metrics.append(0)  # Use 0 to indicate failed evaluation - We might even get in here when LangSmith API connection issues
-            print("Error: No metric value found!")
-            #Also print which condition is true
-            print("result['run'].outputs['output'] is None",result['run'].outputs['output'] is None)
-            print("not result['evaluation_results']['results']",not result['evaluation_results']['results'])
-            # Log the error conditions to a file
-            with open('error_conditions_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                f.write("Error: No metric value found! \n")
-                f.write(f"result['run'].outputs['output'] is None: {result['run'].outputs['output'] is None}\n")
-                f.write(f"not result['evaluation_results']['results']: {not result['evaluation_results']['results']}\n")
-                f.write(f"result['evaluation_results']['results'] {result['evaluation_results']['results']}\n")
-                f.write("\n")
-        else:
-            metrics.append(result['evaluation_results']['results'])
+    # Initialize individual run metric scores for this resample
+    individual_run_metric_scores = {}
+    evaluation_prompts = {}
     
-    # Reorder metrics based on indices_to_reorder
-    reordered_metrics = [metrics[i] for i in indices_to_reorder]
-    metrics = reordered_metrics
-
-    assert len(resample_results)==len(list_of_questions), f"Number of resample results not matching num_questions. Got {len(resample_results)} resample \
-        results but expected {len(list_of_questions)}"
-    #Format is [{'run': RunTree(id=UUID('b7aea73... and there are num_questions runs. There are multiple files, one for each model and one for each resample (for main judge only)
+    for _, metric_name in enumerate(list_of_metrics):
+        individual_run_metric_scores[metric_name] = []
+        evaluation_prompts[metric_name] = []
     
-    #A list with num_questions sublists, each with num_metrics values in the format:
-    #[EvaluationResult(key='completeness', score=5, value='To evaluate
-    with open('process_metrics_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'w', encoding='utf-8') as f:
-        f.write(str(metrics))
-
-    assert len(metrics)==len(list_of_questions), f"Number of metrics not matching num_questions. Got {len(metrics)} metrics but expected {len(list_of_questions)}"
-    
-    #This is at the end a dict with num_metrics keys and each key has num_questions values.
-    #Example: {'completeness_descr': [4, 3, 3, 5, 5, 4, 3], 'relevance_descr': [4, 3, 3, 3, 4, 3, 1], ....} assuming 7 questions
-    individual_run_metric_scores = {} #Keep track of scores of all metrics over all questions for one resample
-
-    for metric_idx, metric_name in enumerate(list_of_metrics): #Get specific metric name and values over all questions for the current resample
-
-        clean_metric_names, metric_scores, metric_prompts = [], [], [] #Metric scores and prompts for all questions for a given resample - num_questions elements each time
+    # Process each question's results
+    for idx, _ in enumerate(resample_results):
+        question_key = f'question_{idx}'
         
-        #Get all metric keys for the current resample over all questions, handling potential missing keys (values set to 0 for those - they are errors)
-        for m in metrics:
-            if m == 0: #If there is an error
-                key = metric_name.replace('_descr','')
-                score = 0
-                prompt=""
-            else:
-                try:
-                    key = m[metric_idx].key #Metric name
-                    score = m[metric_idx].score ##Scores of a given metric over all questions for a given resample
-                    prompt = m[metric_idx].value #Prompt used for the evaluation
-                except:
-                    print("Error: Metric not found - Shouldn't get here")
-                    with open('error_conditions_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a') as f:
-                        f.write("Error: Metric not found - Shouldn't get here \n")
-                    key = metric_name.replace('_descr','')
-                    score = 0
-                    prompt = ""
+        if question_key in resample_results and 'results' in resample_results[question_key]:
+            # Extract scores for each metric for this question
+            for result_item in resample_results[question_key]['results']:
+                metric_key = result_item['key'] + '_descr'
+                score = result_item['score']
                 
-            clean_metric_names.append(key)
-            metric_scores.append(score)
-            metric_prompts.append(prompt)
-            
-        assert all(name == metric_name.replace('_descr','') for name in clean_metric_names), f"Metric keys not matching: clean_metric_names={clean_metric_names}, \
-            expected={metric_name.replace('_descr','')} and their values: {metric_scores}"
-            
-        assert len(metric_scores)==len(list_of_questions), f"Number of metric scores not matching num_questions. Got {len(metric_scores)} metric scores \
-            but expected {len(list_of_questions)}"
-            
-        assert len(metric_prompts)==len(list_of_questions), f"Number of metric prompts not matching num_questions. Got {len(metric_prompts)} metric prompts \
-            but expected {len(list_of_questions)}"
-
-        # Update results DataFrame
-        clean_metric_name = clean_metric_names[0] #Just one metric name without the _descr
-        results_df[f'metric_{clean_metric_name}_{resample_idx+1}'] = metric_scores
-        results_df[f'prompt_{clean_metric_name}_{resample_idx+1}'] = metric_prompts
-        
-        # Store scores for return
-        individual_run_metric_scores[metric_name] = metric_scores #len is num_metrics
-
-    return individual_run_metric_scores, metrics, results_df
-
-def process_metrics_second_judge(excel_path, list_of_metrics, n_resamples, model_name, question_col="questions", judge_model_2=judge_model):
-    """
-    Loads the Excel file and processes metrics and prompts for the second judge model.
-    Returns:
-        - all_run_metric_scores: list of dicts, one per resample, {metric: [scores for all questions]}
-        - all_run_metric_prompts: list of dicts, one per resample, {metric: [prompts for all questions]}
-    """
-    if judge_model_2!='openai/gpt4o-mini':
-        df = pd.read_excel(excel_path)
-        all_run_metric_scores = []
-        all_run_metric_prompts = []
-        num_questions = len(df[question_col])
-
-        at_least_one_nan = False
-
-        for resample_idx in range(n_resamples):
-            run_scores = {}
-            run_prompts = {}
-            for metric_name in list_of_metrics:
-                clean_name = metric_name.replace('_descr', '')
-                judge_name = "_".join(judge_model_2.split('/')[1:])
-                score_col = f"metric_{clean_name}_{resample_idx+1}_{judge_name}"
-                prompt_col = f"prompt_{clean_name}_{resample_idx+1}_{judge_name}"
-                if score_col in df.columns:
-                    # flag_nan = False
-                    if df[score_col].isna().any():
-                        # flag_nan = True
-                        at_least_one_nan = True
-                        with open(f"Column_scores_nan_{'_'.join(judge_model_2.split('/')[1:])}.txt", "a") as col_file:
-                            col_file.write(f"Score col: {score_col} and values are \n {df[score_col]} \n \n")
-                    
-                    df[score_col] = df[score_col].fillna(0)
-                    run_scores[metric_name] = df[score_col].astype(int).tolist()
-
-                    # if flag_nan: #Final output of this function saved elsewhere
-                    #     with open(f"Column_scores_{'_'.join(judge_model_2.split('/')[1:])}.txt", "a") as col_file:
-                    #         col_file.write(f"After conversion to int Score col: {score_col} and values are \n {df[score_col]} \n \n")
-   
+                if metric_key in individual_run_metric_scores:
+                    individual_run_metric_scores[metric_key].append(score)
+                    evaluation_prompts[metric_key].append(result_item['value'])
                 else:
-                    run_scores[metric_name] = [None] * num_questions
-                    print(f"Metric {metric_name} not found in column {score_col}")
-                    with open(f"Column_scores_{'_'.join(judge_model_2.split('/')[1:])}.txt", "a") as col_file:
-                        col_file.write(f"Metric {metric_name} not found in column {score_col} \n \n")
-                if prompt_col in df.columns:
-                    run_prompts[metric_name] = df[prompt_col].tolist()
-                else:
-                    run_prompts[metric_name] = [None] * num_questions
-                    print(f"Prompt {metric_name} not found in column {prompt_col}")
-                    with open(f"Column_scores_{'_'.join(judge_model_2.split('/')[1:])}.txt", "a") as col_file:
-                        col_file.write(f"Prompt {metric_name} not found in column {prompt_col} \n \n")
-
-            all_run_metric_scores.append(run_scores)
-            all_run_metric_prompts.append(run_prompts)
-        
-        if at_least_one_nan:
-            model_parameter = "_".join(model_name.split('/')[1:])
-            with open(f"Column_scores_{'_'.join(judge_model_2.split('/')[1:])}.txt", "a") as col_file:
-                col_file.write(f"####### Judge model: {model_parameter}...... \n \n")
-
-        return all_run_metric_scores, all_run_metric_prompts
-    else:
-        return [], []
+                    print(f"Metric {metric_key} not found in individual_run_metric_scores")
+    
+        else:
+            print(f"Question {idx} not found in resample_results")
+         
+    return individual_run_metric_scores, evaluation_prompts
 
 def calculate_metric_statistics(all_runs_metric_scores, list_of_metrics, num_questions, model_name, judge_model, n_resamples=n_resamples):
     """Calculate statistical metrics across resamples (reduce variance - step 3.1)."""
@@ -262,15 +132,17 @@ def calculate_metric_statistics(all_runs_metric_scores, list_of_metrics, num_que
 
     return metric_stats_resampling
 
-def handle_zero_values(results_df, n_resamples, list_of_metrics, model_name): #Need to be changed for second judge
+def handle_zero_values(results_df, n_resamples, continue_from_resample, list_of_metrics, model_name, judge_name): 
     """
     Handle zero values in results.
     
     Args:
         results_df (pd.DataFrame): DataFrame containing results
         n_resamples (int): Number of resamples
+        continue_from_resample (int): Index of the resample to continue from
         list_of_metrics (list): List of metrics to check
         model_name (str): Name of the model being evaluated
+        judge_name (str): Name of the judge being used
         
     Returns:
         dict: Indices of rows containing zero values for each metric
@@ -279,11 +151,12 @@ def handle_zero_values(results_df, n_resamples, list_of_metrics, model_name): #N
     
     try:
         # Handle 0 values across all resamples - These are errors
-        for resample_idx in range(n_resamples):
+        for resample_idx in range(continue_from_resample, n_resamples):
             for metric in list_of_metrics:
                 try:
                     simple_metric_name = metric.replace('_descr','')
-                    metric_col = f'metric_{simple_metric_name}_{resample_idx+1}'
+                    # judge_name_main = "_".join(judge_name.split('/')[1:])
+                    metric_col = f'metric_{simple_metric_name}_{resample_idx+1}_{judge_name}'
                     
                     # Check if column exists
                     if metric_col not in results_df.columns:
@@ -324,7 +197,7 @@ def handle_zero_values(results_df, n_resamples, list_of_metrics, model_name): #N
         traceback.print_exc()
         return {}  # Return empty dict in case of critical error
 
-def process_zero_values(results_df, zero_rows_columns, list_of_metrics, model_name): #TO BE ACTIVATED - Need to be changed for second judge
+def process_zero_values(results_df, zero_rows_columns, model_name): #TO BE ACTIVATED
     """Process and optionally replace zero values in results."""
     row_zero_counts = {}
     col_zero_counts = {}
@@ -372,17 +245,16 @@ def process_zero_values(results_df, zero_rows_columns, list_of_metrics, model_na
         with open(f"process_zero_values_{model_parameter}.txt", "a") as col_file:
             col_file.write(f"Column/metric {col}: {col_zero_counts[col]} replacements \n")
 
-def reorganize_evaluation_metrics(all_resamples_metrics, list_of_metrics, model_name, list_of_questions, n_resamples, judge_model):
+def reorganize_evaluation_metrics(df, list_of_metrics, list_of_questions, n_resamples, judge_model):
+
     """    
     This function takes evaluation metrics from multiple resampling runs and reorganizes them into
     a structured dictionary where each metric's scores are grouped together. It handles cases where
     some evaluations may have failed (represented by 0s).
     
     Args:
-        all_resamples_metrics (list): List of evaluation results for each resample. Each resample contains
-                                     scores for multiple questions and metrics.
+        df (pd.DataFrame): DataFrame containing evaluation metrics
         list_of_metrics (list): List of metric names to process (e.g., ['completeness_descr', 'relevance_descr']).
-        model_name (str): Name of the model being evaluated, used for logging.
         list_of_questions (list): List of questions that were evaluated.
         n_resamples (int): Number of resampling iterations performed.
         judge_model (str): Name of the judge model being used.
@@ -406,17 +278,9 @@ def reorganize_evaluation_metrics(all_resamples_metrics, list_of_metrics, model_
         #Each resample_metrics (num_resamples in total) has a list of num_questions lists, each having num_metrics values
         #format of each sublist: [EvaluationResult(key='completeness', score=4, value='To evaluate the ...
         #If error, instead of the above list we have just a 0.
-        for resample_idx, resample_metrics in enumerate(all_resamples_metrics):
-
-            # judge_name="_".join(judge_model.split('/')[1:])
-            # #Information exists in all_resamples_metrics_main
-            # with open('resample_metrics_'+str(resample_idx)+'_'+str(metric_name)+'_'+str(model_name.split('/')[1])+"_with_judge_"+judge_name+'.txt', 'w') as f:
-            #     f.write(str(resample_metrics))
-
-            metric_idx = list_of_metrics.index(metric_name) #0-num_metrics the range of values of this. 
-
-            scores = [m[metric_idx].score if m!=0 and m!=[] else 0 
-                     for m in resample_metrics] #num_questions elements each time
+        for resample_idx in range(n_resamples):
+            scores = list(df[f'metric_{clean_name}_{resample_idx+1}_{judge_model}'].values)
+      
             assert len(scores)==len(list_of_questions), "Scores length not matching num_questions"
 
             metric_scores_all_resamples[clean_name].extend(scores) #Every time we add one metric for one resample (num_questions elements)
@@ -425,53 +289,16 @@ def reorganize_evaluation_metrics(all_resamples_metrics, list_of_metrics, model_
 
     return metric_scores_all_resamples
 
-def reorganize_evaluation_metrics_second_judge(
-    excel_path, list_of_metrics, n_resamples, question_col="questions", judge_model_2=judge_model):
-    """
-    Loads the Excel file and reorganizes metrics for the second judge model.
-    Returns a dict: {metric: [all scores for that metric across all resamples/questions]}
-    """
-
-    if judge_model_2!='openai/gpt-4o-mini':
-        df = pd.read_excel(excel_path)
-        metric_scores_all_resamples = {m.replace('_descr', ''): [] for m in list_of_metrics}
-        questions = df[question_col].tolist()
-        num_questions = len(questions)
-
-        for resample_idx in range(n_resamples):
-            for metric_name in list_of_metrics:
-                clean_name = metric_name.replace('_descr', '')
-                judge_name = "_".join(judge_model_2.split('/')[1:])
-                col = f"metric_{clean_name}_{resample_idx+1}_{judge_name}"
-                if col not in df.columns:
-                    with open(f"warning_{'_'.join(judge_model_2.split('/')[1:])}.txt", "a") as col_file:
-                        col_file.write(f"Warning excel: {col} not found in DataFrame \n")
-                    print(f"Warning excel: {col} not found in DataFrame")
-                    continue
-                scores = df[col].tolist()
-                initial_scores = scores
-                assert len(scores) == num_questions, f"Scores length not matching num_questions for {col}"
-                scores=[0 if value is None or (isinstance(value, float) and np.isnan(value)) else value for value in scores]
-                final_scores = scores
-                metric_scores_all_resamples[clean_name].extend(scores)
-
-                if final_scores!=initial_scores:
-                    with open(f"warning_{'_'.join(judge_model_2.split('/')[1:])}.txt", "a") as col_file:
-                        col_file.write(f"Initial scores for col {col} are {initial_scores} \n")
-                        col_file.write(f"Final scores for col {col} are {scores} \n")
-
-        return metric_scores_all_resamples
-
 def save_results(results_df, judge_model, model_id, save_file=True):
-    """Save results DataFrame to Excel."""
-
+    """Save results DataFrame to Excel and extract reasoning traces and final answers from predicted answers."""
+    print("Judge model to save results for is:",judge_model)
     filename = (f"results_{'_'.join(judge_model.split('/')[1:])}_judge_with_"
                     f"{model_id.replace('/','_')}.xlsx")
     try:
         #Extract reasoning traces and final answers from predicted answers
         # Check for <think> tags in predicted answer columns and split them if found
         for col in results_df.columns:
-            if 'predicted_answer' in col:
+            if 'predicted_answer_' in col:
                 # Create new column names
                 number_pred_col = col.split('_')[2]
                 reasoning_col = f'reasoning_trace_{number_pred_col}'

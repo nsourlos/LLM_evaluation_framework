@@ -3,11 +3,9 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
 from sentence_transformers import CrossEncoder
-import openai
-from langsmith.wrappers import wrap_openai
+from openai import OpenAI
 
-from src.llm_eval.config import excel_file_name, reranker_model_name
-from src.llm_eval.config import openai_api_key
+from src.llm_eval.config import excel_file_name, reranker_model_name, openai_api_key
 from ..utils.paths import get_file_paths
 
 _, _, custom_cache_dir, _, _ = get_file_paths(excel_file_name)
@@ -102,7 +100,7 @@ def check_context_relevance(query, similar_pairs, judge_model, openai_api_key=op
     ]
     
     #Use OpenAI to judge relevance
-    client = wrap_openai(openai.Client(api_key=openai_api_key))
+    client = OpenAI(api_key=openai_api_key)
     
     response = client.chat.completions.create(
         messages=messages,

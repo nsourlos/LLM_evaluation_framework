@@ -6,7 +6,6 @@ import pandas as pd
 import os
 import glob
 from .statistics import plot_metric_distributions, plot_question_scores
-from src.llm_eval.config import judge_model_2
 
 def plot_ordered_scores(metric_names, question_scores_by_metric, colors):
     """Plot metrics ordered by score values"""
@@ -149,7 +148,7 @@ def plot_figures_metrics(all_runs_model_metrics, metric_names, model_name, judge
         summary_stats_all_runs[run_idx] = run_stats #For one run
 
         grouped_values=list(metric_values_run.values()) #Values of all metrics for one run over all questions. There are num_metrics lists in that list. 
-        values = [val for sublist in grouped_values for val in sublist] #Flatten the list - Size is num_questions*num_metrics (1st metric questions, 2nd metric questions, etc)
+        # values = [val for sublist in grouped_values for val in sublist] #Flatten the list - Size is num_questions*num_metrics (1st metric questions, 2nd metric questions, etc)
         
         question_scores_by_metric, score_metric_counts = plot_question_scores(metric_names, grouped_values, colors)
         plt.xlabel('Metrics')
@@ -258,7 +257,6 @@ def plot_model_comparison(models, metrics, metric_means, metric_stds, save_prefi
     fig.suptitle("Metric Comparison Across LLMs (± std dev)", fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(f"metric_comparison_grid_judge_{save_prefix}.png", dpi=300, bbox_inches='tight')
-    # plt.show()
 
     # Plot 2: Grouped bar chart
     width = 0.12
@@ -330,7 +328,6 @@ def plot_model_comparison(models, metrics, metric_means, metric_stds, save_prefi
     ax.legend(title='Metric', bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
     plt.tight_layout(rect=[0, 0, 0.88, 0.97])
     plt.savefig(f"metric_comparison_summary_by_LLM_judge_{save_prefix}.png", dpi=300, bbox_inches='tight')
-    # plt.show()
 
 def plot_spider_chart(models, metrics, metric_means, save_prefix=""):
     """
@@ -381,7 +378,6 @@ def plot_spider_chart(models, metrics, metric_means, save_prefix=""):
     plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
 
     plt.savefig(f"spider_chart_judge_{save_prefix}.png", dpi=300, bbox_inches='tight')
-    # plt.show()
 
 def plot_and_save_model_comparisons(comparison_results, list_of_metrics, suffix):
     # Extract metrics and models from comparison_results
@@ -446,10 +442,7 @@ def plot_and_save_model_comparisons(comparison_results, list_of_metrics, suffix)
     # Save plot before showing with high resolution
     plt.savefig(f'model_comparisons_{suffix}.png', bbox_inches='tight', dpi=600)  # Increased DPI for higher resolution
 
-    # Show plot after saving
-    # plt.show()
-
-def create_performance_plots(save_dir, judge_model_2=judge_model_2):
+def create_performance_plots(save_dir, judge_model):
     """
     Creates both a bar plot and radar chart showing LLM performance by model and task category.
     Analyzes final_results*.xlsx files and groups them by task types.
@@ -457,13 +450,20 @@ def create_performance_plots(save_dir, judge_model_2=judge_model_2):
     
     Args:
         save_dir (str): Directory containing the result files
-        judge_model_2 (str, optional): If specified, only processes files matching final_results_{judge_model_2}*.xlsx
+        judge_model (str, optional): If specified, only processes files matching final_results_{judge_model}*.xlsx
     """
+
+    print("Judge model for performance plots:",judge_model)
+
+    if len(judge_model) > 1:
+        judge_model=judge_model[-1]
+    else:
+        judge_model=""
     
-    # Determine which Excel files to process based on judge_model_2
-    if judge_model_2:
-        # Extract judge name from judge_model_2 path (e.g., 'openai/gpt-4o-mini' -> 'gpt-4o-mini')
-        judge_name = '_'.join(judge_model_2.split('/')[1:])
+    # Determine which Excel files to process based on judge_model
+    if judge_model:
+        # Extract judge name from judge_model path (e.g., 'openai/gpt-4o-mini' -> 'gpt-4o-mini')
+        judge_name = '_'.join(judge_model.split('/')[1:])
         pattern = f'final_results_{judge_name}*.xlsx'
         excel_files = glob.glob(os.path.join(save_dir, pattern))
         print(f"Looking for files matching pattern: {pattern}")
@@ -632,7 +632,7 @@ def create_performance_plots(save_dir, judge_model_2=judge_model_2):
         plt.tight_layout()
         
         # Save the bar plot
-        metric_safe_name = metric_judge_key.replace('metric_', '')
+        metric_safe_name = metric_judge_key.replace('metric_', '').replace('/', '_').title()
         output_file = os.path.join(save_dir, f'llm_performance_by_model_metric_{metric_safe_name}.png')
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()

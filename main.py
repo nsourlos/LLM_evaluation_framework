@@ -1,10 +1,6 @@
 import json
 import os
 import time
-import requests
-from langsmith import Client
-from langsmith.evaluation import evaluate
-from langsmith.utils import LangSmithConnectionError
 from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
@@ -12,6 +8,7 @@ import torch
 from termcolor import colored
 import traceback
 import glob
+from tqdm import tqdm
 
 import matplotlib
 matplotlib.use('Agg') #to avoid Tkinter error
@@ -22,12 +19,13 @@ from src.llm_eval.config import (
     excel_file_name,
     models,
     judge_model,
-    judge_model_2,
     commercial_api_providers,
     generate_max_tokens,
     generation_max_tokens_thinking,
+    max_output_tokens,
     domain,
     n_resamples,
+    continue_from_resample,
     tool_usage,
     use_RAG,
     use_smolagents,
@@ -40,9 +38,9 @@ from src.llm_eval.config import (
     groq_api_key,
 )
 
-from src.llm_eval.core.data_loader import load_data, create_dataset_and_load, get_dataset_name 
+from src.llm_eval.core.data_loader import load_data
 from src.llm_eval.core.model_utils import get_model
-from src.llm_eval.evaluation.evaluator import factor_evaluator, apply_second_judge
+from src.llm_eval.evaluation.evaluator import evaluate_results
 from src.llm_eval.evaluation.prompts import list_of_metrics, extract_code_prompt, simulation_prompt, tool_error_prompt, prediction_prompt
 from src.llm_eval.utils.processing import (
     process_evaluation_results,
@@ -50,8 +48,6 @@ from src.llm_eval.utils.processing import (
     calculate_metric_statistics,
     reorganize_evaluation_metrics,
     save_results,
-    process_metrics_second_judge,
-    reorganize_evaluation_metrics_second_judge,
     handle_zero_values,
     process_zero_values,
 )
@@ -65,50 +61,23 @@ from src.llm_eval.utils.statistics import (
     create_comparison_table
 ) 
 
-from src.llm_eval.utils.plotting import (plot_and_save_model_comparisons, plot_model_comparison, plot_spider_chart, plot_figures_metrics, create_performance_plots)
+from src.llm_eval.utils.plotting import plot_and_save_model_comparisons, plot_model_comparison, plot_spider_chart, plot_figures_metrics, create_performance_plots
 from src.llm_eval.utils.rag import get_similar_qa_pairs, rerank_retrieved_documents, check_context_relevance, format_context
 from src.llm_eval.tools.tool_usage import decide_tool_usage
 from src.llm_eval.providers.api_handlers import get_model_response
 from src.llm_eval.tools.code_execution import handle_code_extraction, text_for_simulation, run_python_script
 
-def create_langsmith_dataset(dataset_name, example_inputs, langsmith_api_key, domain=domain):
 
-    client = Client(api_key=langsmith_api_key)
-
-    try:
-        #Load the dataset if already exists
-        for existing_dataset in client.list_datasets():
-            if existing_dataset.name==dataset_name:
-                dataset_langsmith=existing_dataset
-        for x in dataset_langsmith:
-            print("Dataset Loaded")
-            break
-
-    except: #Otherwise create it
-        print("Dataset not found. Creating new dataset")
-        # Storing inputs in a dataset lets us run chains and LLMs over a shared set of examples.
-        dataset_langsmith = client.create_dataset(dataset_name=dataset_name,
-                                                description="Q&A_"+ domain + "_engineering.")
-
-        for input_prompt, output_answer in example_inputs:
-            client.create_example(
-                inputs={"question": input_prompt.replace('\n', ' ')},
-                outputs={"answer": output_answer.replace('\n', ' ')},
-                # metadata={"source": "Wikipedia"},
-                dataset_id=dataset_langsmith.id,
-            )
-
-    return dataset_langsmith
-
-def predict(inputs: dict, use_RAG: bool = use_RAG, use_smolagents: bool = use_smolagents, tool_usage: bool = tool_usage,
-            generate_max_tokens: int = generate_max_tokens, judge_model: str = judge_model, generation_max_tokens_thinking: int = generation_max_tokens_thinking,
+def predict(inputs: dict, model_name: str, use_RAG: bool = use_RAG, use_smolagents: bool = use_smolagents, tool_usage: bool = tool_usage,
+            generate_max_tokens: int = generate_max_tokens, judge_model: str = judge_model[0], generation_max_tokens_thinking: int = generation_max_tokens_thinking,
             extract_code_prompt: str = extract_code_prompt, simulation_prompt: str = simulation_prompt, tool_error_prompt: str = tool_error_prompt,
             prediction_prompt: str = prediction_prompt, openai_api_key: str = openai_api_key, commercial_api_providers: list = commercial_api_providers) -> dict:
     
     """Given a question, return the answer from the model, optionally using tools if tool_usage is True"""
     
+    print("Running prediction for model:", model_name)
+
     # Get these variables from the global scope
-    global model_name
     global vectorstore, reranker
 
     # Configure token limits based on model type - Reasoning model with CoT should have longer max_tokens to include the reasoning steps
@@ -166,10 +135,12 @@ def predict(inputs: dict, use_RAG: bool = use_RAG, use_smolagents: bool = use_sm
         user_content=question
         print("RAG is disabled")
 
+    print("Tool usage is:",tool_usage)
     # If tool_usage is enabled, check if we should use a tool for this question
     if tool_usage:
         model_parameter = "_".join(model_name.split('/')[1:])
         tool_name = decide_tool_usage(inputs['question'])
+        print("Tool name:",tool_name)
 
         if tool_name[0]!='no_tool_needed':
             print(f"Using tool: {tool_name}")
@@ -307,92 +278,97 @@ def predict(inputs: dict, use_RAG: bool = use_RAG, use_smolagents: bool = use_sm
         
         return {"output": response}
     
-def perform_evaluation(model_id, judge_model, n_resamples, example_inputs, factor_evaluator, langsmith_api_key, use_RAG=False, use_smolagents=False, tool_usage=False):
-    """Perform evaluation runs and collect results."""
+def generate_predictions(model_id,  n_resamples, continue_from_resample, excel_file_name, judge_model, use_RAG=False, use_smolagents=False, tool_usage=False):
+    """Perform evaluation runs and collect results.""" #judge_model,
     global vectorstore, reranker
-    dataset_name = get_dataset_name(model_id, judge_model, use_RAG=use_RAG, use_smolagents=use_smolagents, tool_usage=tool_usage) #How the dataset will be named in Langsmith
-    dataset_langsmith = create_langsmith_dataset(dataset_name, example_inputs, langsmith_api_key)
-    results_df, list_of_questions, vectorstore, reranker = process_evaluation_results(langsmith_api_key=langsmith_api_key, dataset_langsmith=dataset_langsmith, use_RAG=use_RAG)
+    results_df, list_of_questions, vectorstore, reranker = process_evaluation_results(excel_file_name, use_RAG=use_RAG)
 
-    print("Vectorstore:",vectorstore)
-    print("List of questions:",list_of_questions)
-    model_name = "_".join(model_id.split('/')[1:])
-    judge_name = "_".join(judge_model.split('/')[1:])
-    with open('vectorstore_'+str(model_name)+'_judge_'+str(judge_name)+'.txt', 'a') as f:
-        f.write(str(vectorstore) + "\n")
-        try:
-            f.write(f"actual variable {vectorstore()}")
-        except Exception as e:
-            f.write(f"Error writing vectorstore to file: {e}")
-            pass
+    # If continuing from a previous resample, try to load existing results
+    if continue_from_resample != 0:
+        # Try each judge model from last to first
+        for judge in reversed(judge_model):
+            # Construct the pattern for existing results files
+            pattern = f"results_{'_'.join(judge.split('/')[1:])}_judge_with_{model_id.replace('/','_')}.xlsx"
+            existing_files = glob.glob(pattern)
+            
+            if existing_files:
+                # Load the most recently modified file
+                latest_file = max(existing_files, key=os.path.getmtime)
+                print(f"Loading existing results from {latest_file} using judge {judge}")
+                try:
+                    existing_df = pd.read_excel(latest_file)
+                    # Verify the file has the expected structure
+                    if 'questions' in existing_df.columns and 'answers' in existing_df.columns:
+                        results_df = existing_df
+                        print("Successfully loaded existing results")
+                        break  # Exit loop once we find valid results
+                    else:
+                        print(f"Existing file for judge {judge} does not have expected columns, trying next judge")
+                except Exception as e:
+                    print(f"Error loading existing results for judge {judge}: {e}")
+                    continue  # Try next judge
+            else:
+                print(f"No existing results found for judge {judge}, trying next judge")
+        
+        if all(not glob.glob(f"results_{'_'.join(j.split('/')[1:])}_judge_with_{model_id.replace('/','_')}.xlsx") for j in judge_model):
+            print("No existing results found for any judge, using fresh DataFrame")
 
-    evaluation_all_resamples = [] #Used below to obtain the unique questions/answers and also the results of each resample
+    # print("Vectorstore:",vectorstore)
+    # model_name = "_".join(model_id.split('/')[1:])
+    # with open('vectorstore_'+str(model_name)+'.txt', 'a') as f:
+    #     f.write(str(vectorstore) + "\n")
+    #     try:
+    #         f.write(f"actual variable {vectorstore()}")
+    #     except Exception as e:
+    #         f.write(f"Error writing vectorstore to file: {e}")
+    #         pass
     
     begin = time.time()
-    for resample_idx in range(n_resamples):
+
+    for resample_idx in range(continue_from_resample, n_resamples):
         print(f"\nPerforming evaluation of resample {resample_idx+1}/{n_resamples} of {model_id}")
 
-        max_retries = 1 #try only once if connection issues
-        backoff_factor = 5
-        attempt_langsmith = 0
-        # while True: #Activate this to retry if connection issues
-        try:
-            evaluation_results = evaluate(
-                predict, #Function that call our LLM and returns its output
-                data=dataset_langsmith.name, #Just using dataset_langsmith doesn't work 
-                evaluators=[factor_evaluator], #Evaluators to use
-                max_concurrency=1, #Run one question through langsmith each time - Other values will give errors in resulting excels
-                # metadata={"revision_id": "the version of your pipeline you are testing"},
-                experiment_prefix=str(judge_model) + '_judge_with_' + str(model_id) + '_resample_' + str(resample_idx) # A prefix for experiment names to identify them
-            )
+        # Create column name for this resample
+        column_name = f'predicted_answer_{resample_idx}'
+        
+        # Initialize list to store predictions for this resample
+        predictions_list = []
+        
+        # Loop over the results_df rows
+        for _, row in tqdm(results_df.iterrows(), total=len(results_df), desc=f"Processing predictions for df for resample {resample_idx+1}"):
+            question = row['questions']
+            answer = row['answers']
+            inputs = {'question': question, 'answer': answer}
+            predictions = predict(inputs, model_id, use_RAG=use_RAG, use_smolagents=use_smolagents, tool_usage=tool_usage,)
+            # print("Predictions:", predictions)
+            predictions_list.append(predictions['output'])
+
+        # Assert that the number of predictions matches the number of rows in the DataFrame
+        assert len(predictions_list) == len(results_df), f"Mismatch: {len(predictions_list)} predictions for {len(results_df)} rows"
+        
+        # Add the predictions as a new column to results_df
+        if continue_from_resample != 0:
+            # Get list of existing predicted_answer columns
+            pred_cols = [col for col in results_df.columns if col.startswith('predicted_answer_')]
             
-            # Save evaluation results for this run
-            run_id = f"run_{resample_idx+1}"
-            eval_filename = f"evaluation_result_{run_id}_{model_name}_judge_{judge_name}.txt"
-
-            try:
-                # Write the list to file
-                print("Eval results for run:", evaluation_results)
-                with open(eval_filename, 'w', encoding='utf-8') as f:
-                    # Convert evaluation results to string representation
-                    eval_str = ""
-                    for i, result in enumerate(evaluation_results):
-                        eval_str += f"{result}\n"
-                    f.write(eval_str)
-
-            except Exception as e:
-                print(f"Error saving evaluation results to file: {e}")
+            # Find insertion index - after questions, answers and any existing predicted_answer columns
+            if pred_cols:
+                # Insert after last predicted_answer column
+                insert_idx = results_df.columns.get_loc(pred_cols[-1]) + 1
+            else:
+                # Insert after questions and answers columns
+                insert_idx = 2
                 
-            # break #Activate this to retry if connection issues
-        except (LangSmithConnectionError, requests.exceptions.ConnectionError) as e:
-            if attempt_langsmith >= max_retries:
-                raise
-            wait_time = backoff_factor * (2 ** attempt_langsmith)
-            print(f"[Retry {attempt_langsmith+1}/{max_retries}] LangSmith connection failed: {e}. Retrying in {wait_time}s...")
-            with open("retry_log.txt", "a") as log:
-                log.write(f"[Retry {attempt_langsmith+1}/{max_retries}] LangSmith connection failed: {e}. Retrying in {wait_time}s...")
-                log.write("\n **********")
-            with open("retry_eval_log.txt", "a", encoding='utf-8') as log:
-                try:
-                    log.write(f"Evaluation results: \n {evaluation_results}")
-                except Exception as e:
-                    log.write(f"Unable to write evaluation results to log file: {e}")
-                log.write("\n **********")
-            time.sleep(wait_time)
-            attempt_langsmith += 1
-    
-        evaluation_all_resamples.extend(evaluation_results) #Used below to get unique questions/answers and to select the predicted answers
-        #After the loop, we get a list with n_resamples*num_questions elements, for just one model (and only for main judge)
-
-    with open('evaluation_all_resamples_'+str(model_name)+'_judge_'+str(judge_name)+'.txt', 'w', encoding='utf-8') as f:
-        f.write(str(evaluation_all_resamples))
-
-    assert len(evaluation_all_resamples)==n_resamples*len(example_inputs), f"Number of evaluation results not matching num_resamples*num_questions. \
-        Got {len(evaluation_all_resamples)} evaluation results but expected {n_resamples*len(example_inputs)}"
+            # Insert new column at the correct position
+            results_df.insert(insert_idx, column_name, predictions_list)
+        else:
+            # Original implementation
+            results_df[column_name] = predictions_list
+        # print("Results_df:", results_df)
     
     print(f"Total time for evaluation: {time.time() - begin}")
 
-    return evaluation_all_resamples, dataset_langsmith, results_df, list_of_questions, vectorstore, reranker
+    return results_df, list_of_questions, vectorstore, reranker
 
 def add_id_and_origin_file_columns(save_dir, excel_file_name):
     """
@@ -467,14 +443,20 @@ def main():
         with open('error_stdout_stderr.txt', 'a', encoding='utf-8') as f:
             f.write(f"Error running stdout: {stdout} \n and stderr: {stderr} \n {e}")
 
-    #https://docs.smith.langchain.com/old/evaluation/faq/manage-datasets
-    dataset_test = create_dataset_and_load(excel_file_name)
-    example_inputs = [(x['input'],x['output']) for x in dataset_test]
-    print("Example inputs:", example_inputs, "\n")
-
     #Try to load already saved data (if some models have already been evaluated), otherwise initialize empty dicts
-    all_models_stats, all_runs_model_metrics = load_model_stats(judge_model) 
-    all_models_stats_judge2, all_runs_model_metrics_judge2 = load_model_stats(judge_model_2)
+    all_models_stats_judge_dicts = {}
+    all_runs_model_metrics_judge_dicts = {}
+    
+    for judge_idx, judge_load in enumerate(judge_model):
+            stats_judge, metrics_judge = load_model_stats(judge_load)
+            all_models_stats_judge_dicts[f'all_models_stats_judge_{judge_idx+1}'] = stats_judge
+            all_runs_model_metrics_judge_dicts[f'all_runs_model_metrics_judge_{judge_idx+1}'] = metrics_judge
+        
+    # Create individual variables for each judge
+    for judge_idx in range(len(judge_model)):
+            globals()[f'all_models_stats_judge_{judge_idx+1}'] = all_models_stats_judge_dicts.get(f'all_models_stats_judge_{judge_idx+1}', {})
+            globals()[f'all_runs_model_metrics_judge_{judge_idx+1}'] = all_runs_model_metrics_judge_dicts.get(f'all_runs_model_metrics_judge_{judge_idx+1}', {})
+
 
     for model_id in models:
         global model_name, model, tokenizer, pipeline, generate_max_tokens, vectorstore
@@ -482,364 +464,151 @@ def main():
         model_parameter = "_".join(model_name.split('/')[1:])
         model, tokenizer, pipeline = get_model(model_name, commercial_api_providers)
         
-        try: #Sometimes some errors with the evaluation
-            evaluation_all_resamples, dataset_langsmith, results_df, list_of_questions, vectorstore, reranker = perform_evaluation(model_id, judge_model, n_resamples,
-                                                                                                                                example_inputs, factor_evaluator,
-                                                                                                                                langsmith_api_key, use_RAG=use_RAG,
-                                                                                                                                use_smolagents=use_smolagents,
-                                                                                                                                tool_usage=tool_usage)
-            chunk_size = len(example_inputs) #Number of questions
+        try: #Sometimes some errors with the evaluation 
+            print("Generating predictions for model:", model_id)
+            print("Excel file name:", excel_file_name)
+            print("Judge models are:",judge_model)
+            results_df, list_of_questions, vectorstore, reranker = generate_predictions(model_id,  n_resamples, continue_from_resample, 
+                                                                                        excel_file_name, judge_model, use_RAG=use_RAG,
+                                                                                        use_smolagents=use_smolagents,
+                                                                                        tool_usage=tool_usage) 
             
-            all_resamples_metrics = [] #Keep track of all metrics over all resamples and all questions
-            #There will be n_resamples lists, each with num_questions sublists (each having num_metrics sublists) (so num_questions*num_metrics elements in those in total)
-            #Each question will have 6 metric values like this: [EvaluationResult(key='completeness', score=4, value='To evaluate the ....
-            all_runs_metric_scores = [] #This will be appended to the input that plots metrics at the end. 
-            #The format of it is [{metric1_descr_run1: [q1_score, q2_score, ...], metric2_descr_run1: [q1_score, q2_score, ...], ...}, 
-            #                     {metric1_descr_run2: [q1_score, q2_score, ...], metric2_descr_run2: [q1_score, q2_score, ...], ...},
-            #                     ...num_runs]
-            
+            # Initialize metric scores lists for each judge 
+            for judge_idx in range(len(judge_model)): 
+                    globals()[f'all_runs_metric_scores_{judge_idx+1}'] = []
+
             # Process each resample
-            for resample_idx in range(n_resamples):
-                start_idx = resample_idx * chunk_size #start index of current resample (chunk size is the number of questions of each resample)
-                #Resample_results saved in the process_metrics function
-                resample_results = evaluation_all_resamples[start_idx:start_idx + chunk_size] #Get results of a particular resample
-                assert len(resample_results)==chunk_size, f"Number of resample results not matching num_questions. Got {len(resample_results)} resample results \
-                    but expected {chunk_size}"
-                predicted_answers = [x['run'].outputs['output'] for x in resample_results] #None if error
-                assert len(predicted_answers)==chunk_size, f"Number of predicted answers not matching num_questions. Got {len(predicted_answers)} predicted answers \
-                    but expected {chunk_size}"
+            for resample_idx in range(continue_from_resample, n_resamples):
 
-                #We check below if there is any none ('') in predicted_answers and if so, we reorder the questions
-                with open('predicted_answers_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                    f.write(str(predicted_answers))
-                    f.write("\n \n")
-                    print("Total num of predicted answers:",len(predicted_answers))
-                    f.write(f"Total num of predicted answers: {len(predicted_answers)}")
-                    f.write("............ \n \n")
+                for judge_index,judge_model_name in enumerate(judge_model):
+                    print("Looping over judge:", judge_model_name, "and resample:", resample_idx)
 
-                run_questions=[x['run'].inputs['inputs']['question'] for x in resample_results]
-                with open('run_questions_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                    f.write(str(run_questions))
-                    f.write("\n \n")
-                    print("Total num of run questions:",len(run_questions))
-                    f.write(f"Total num of run questions: {len(run_questions)}")
-                    f.write("............ \n \n")
+                    #This has the predicted answers - not related to judges but has to be in the loop for judge_model
+                    results_df=save_results(results_df, judge_model_name, model_id, save_file=False) #For thinking models, we only feed the actual answer to the judge, not the thinking trace
 
-                # Get indices to reorder run_questions to match list_of_questions
-                reorder_indices = []
-                used_indices = set()
+                    results_dict = evaluate_results(results_df, resample_idx, judge_model_name, max_output_tokens, tool_usage) 
 
-                existing_questions = set(run_questions) - {'-'} - {'--'}
-                with open('existing_questions_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:  
-                    f.write(str(existing_questions))
-                    f.write("\n \n")
-                    print("Total num of existing questions:",len(existing_questions))
-                    f.write(f"Total num of existing questions: {len(existing_questions)}")
-                    f.write("............ \n \n")
-                missing_questions = [q for q in list_of_questions if q not in existing_questions]
-                with open('missing_questions_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                    f.write(str(missing_questions))
-                    f.write("\n \n")
-                    print("Total num of missing questions:",len(missing_questions))
-                    f.write(f"Total num of missing questions: {len(missing_questions)}")
-                    f.write("............ \n \n")
-                remaining_indices = [list_of_questions.index(val) for i, val in enumerate(missing_questions)]
-                with open('remaining_indices_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                    f.write(str(remaining_indices))
-                    f.write("\n \n")
-                    print("Total num of remaining indices:",len(remaining_indices))
-                    f.write(f"Total num of remaining indices: {len(remaining_indices)}")
-                    f.write("............ \n \n")
+                    individual_run_metric_scores, evaluation_prompts = process_metrics(results_dict, list_of_metrics)     
 
-                for q in run_questions:
-                    if q in list_of_questions:
-                        idx = list_of_questions.index(q)
-                        reorder_indices.append(idx)
-                        used_indices.add(idx)
-                    else:
-                        reorder_indices.append(None)
-                        with open('warning_run_questions_reordering_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                            f.write(f"Warning: Question '{q}' not found in list_of_questions \n")
+                    for metric_name in list_of_metrics:
+                        clean_metric_name = metric_name.replace('_descr', '')
+                        results_df[f'metric_{clean_metric_name}_{resample_idx+1}_{judge_model_name}'] = individual_run_metric_scores[metric_name]
+                        
+                        # For prompts, we'll use empty strings for now since the format doesn't include them
+                        results_df[f'prompt_{clean_metric_name}_{resample_idx+1}_{judge_model_name}'] = evaluation_prompts[metric_name]
+                    
+                    # Handle zero values
+                    zero_rows_columns = handle_zero_values(results_df, n_resamples, continue_from_resample, list_of_metrics, model_name, judge_name=judge_model_name)
+                    print("Model ID and judge", model_id, judge_model_name)
+                    print("Scores from judge", individual_run_metric_scores, 'and resample', resample_idx+1)
+                    print("First judge is:",judge_model_name)
 
-                all_indices = set(range(len(list_of_questions)))
-                remaining_indices = list(all_indices - used_indices)
-                with open('remaining_indices_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                    f.write(str(remaining_indices))
-                    f.write("\n \n")
-                    print("Total num of remaining indices:",len(remaining_indices))
-                    f.write(f"Total num of remaining indices: {len(remaining_indices)}")
-                    f.write("............ \n \n")
+                    with open(f"individual_run_metric_scores_{model_name.split('/')[1]}.txt", "a", encoding='utf-8') as col_file: #Also saved in all_runs_metric_scores below
+                        col_file.write(f"Model ID and judge: {model_id} and {judge_model_name} \n")
+                        col_file.write(f"Scores from judge {individual_run_metric_scores} \n")
 
-                # Replace None with remaining indices
-                ri_iter = iter(remaining_indices)
-                reorder_indices = [i if i is not None else next(ri_iter) for i in reorder_indices]
-                # Append any leftover indices not already used
-                reorder_indices += list(ri_iter)
+                    if zero_rows_columns: #Only keeps tracks of missing values if there are any - NOT ACTIVATED YET
+                        unique_zero_rows_columns = len(set([x for sublist in list(zero_rows_columns.values()) for x in sublist]))
+                        print(colored(f"ERROR: Found missing values in {unique_zero_rows_columns} rows out of {len(results_df)}", 'red'))
+                        with open(f"missing_values_log_{model_parameter}.txt", "a", encoding='utf-8') as col_file:
+                            col_file.write(f"ERROR: Found missing values in {unique_zero_rows_columns} rows out of {len(results_df)}. These are the rows: {zero_rows_columns}, \
+                                        where the values of dict are the indices of the rows with missing values. Model is {model_name} and judge is {judge_model_name}\n")
+                        process_zero_values(results_df, zero_rows_columns, model_name) #Replace 0s with mean of non-zero values    
 
-                if reorder_indices!=range(len(list_of_questions)):
-                    with open('reorder_indices_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                        f.write(f"Indices were reordered for model {model_parameter} and judge {judge_model} \n")
-                        f.write(str(reorder_indices))
-                        f.write("\n \n")
-                        print("Total num of reorder indices:",len(reorder_indices))
-                        f.write(f"Total num of reorder indices: {len(reorder_indices)}")
-                        f.write("............ \n \n")
+                    #Has n_resamples lists, each with num_metrics sublists (each sublist has scores over all questions of one metric) 
+                    globals()[f'all_runs_metric_scores_{judge_index+1}'].append(individual_run_metric_scores)
 
-                # If reorder_indices length doesn't match questions length, use sequential indices
-                if len(reorder_indices) != len(list_of_questions):
-                    print(f"Warning: Reorder indices length ({len(reorder_indices)}) doesn't match questions length ({len(list_of_questions)}). \
-                        These indices are {reorder_indices}. Using sequential indices.")
-                    reorder_indices = list(range(len(list_of_questions)))
-                
-                # Reorder run_questions and predicted_answers using the indices
-                run_questions = [run_questions[i] for i in reorder_indices]
-                predicted_answers2 = [predicted_answers[i] for i in reorder_indices]
-                
-                if reorder_indices!=range(len(list_of_questions)):
-                    # Save reordered questions and answers
-                    with open('run_questions_reordered_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                        f.write(str(run_questions))
-                        f.write("\n \n")
-                        print("Total num of reordered questions",len(run_questions))
-                        f.write(f"Total num of reordered questions {len(run_questions)}")
-                        f.write("............ \n \n")
-                    with open('predicted_answers_reordered_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                        f.write(str(predicted_answers2))
-                        f.write("\n \n")
-                        print("Total num of reordered answers",len(predicted_answers))
-                        f.write(f"Total num of reordered answers {len(predicted_answers2)}")
-                        f.write("............ \n \n")
+                    if continue_from_resample!=0:
+                        # Load existing metric scores for resamples before continue_from_resample
+                        existing_runs_metric_scores = []
+                        
+                        for prev_resample_idx in range(continue_from_resample):
+                            prev_individual_run_metric_scores = {}
+                            
+                            for metric_name in list_of_metrics:
+                                clean_metric_name = metric_name.replace('_descr', '')
+                                metric_col = f'metric_{clean_metric_name}_{prev_resample_idx+1}_{judge_model_name}'
+                                
+                                if metric_col in results_df.columns:
+                                    prev_individual_run_metric_scores[metric_name] = results_df[metric_col].tolist()
+                                else:
+                                    prev_individual_run_metric_scores[metric_name] = [0] * len(results_df)
+                            
+                            existing_runs_metric_scores.append(prev_individual_run_metric_scores)
+                        
+                        # Prepend existing scores to maintain correct order (resample 1, 2, 3, then new ones)
+                        globals()[f'all_runs_metric_scores_{judge_index+1}'] = existing_runs_metric_scores + globals()[f'all_runs_metric_scores_{judge_index+1}']
+                        print("All runs metric scores for judge", judge_model_name, "are:", globals()[f'all_runs_metric_scores_{judge_index+1}'])
+                    
+                    # Save initial results
+                    print("Saving results for judge:::",judge_model_name)
+                    save_results(results_df, judge_model_name, model_id)
 
-                # Verify the reordering worked
-                try:
-                    assert len(run_questions) == len(list_of_questions), "Questions reordering failed - orders don't match"
-                    predicted_answers = predicted_answers2
-                except AssertionError:
-                    print("Questions reordering failed - using sequential indices")
-                    with open('warning_questions_reordering_'+str(resample_idx)+'_'+str(model_parameter)+'.txt', 'a', encoding='utf-8') as f:
-                        f.write(f"Questions reordering failed - using sequential indices. Original indices: {reorder_indices}\n")
-                    reorder_indices = list(range(len(list_of_questions)))
 
-                #Add predicted answers to df
-                results_df[f'predicted_answer_{resample_idx+1}'] = predicted_answers
-                results_df=save_results(results_df, judge_model, model_id, save_file=False)
+            for judge_index,judge_model_name in enumerate(judge_model):
+                # Calculate statistics - Only to keep track that everything works - Not used
+                metric_stats_resampling = calculate_metric_statistics(
+                    globals()[f'all_runs_metric_scores_{judge_index+1}'], 
+                    list_of_metrics, 
+                    len(list_of_questions),
+                    model_name,
+                    judge_model_name
+                )
 
-                individual_run_metric_scores, metrics, results_df = process_metrics(
-                        resample_results, 
-                        list_of_metrics, 
-                        list_of_questions,
-                        resample_idx,
-                        results_df,
-                        model_name,
-                        reorder_indices
-                    )           
-                
-                # Handle zero values
-                zero_rows_columns = handle_zero_values(results_df, n_resamples, list_of_metrics, model_name)
-                print("Model ID and judge", model_id, judge_model)
-                print("Scores from first judge", individual_run_metric_scores)
-
-                with open(f"individual_run_metric_scores_{model_name.split('/')[1]}.txt", "a", encoding='utf-8') as col_file: #Also saved in all_runs_metric_scores below
-                    col_file.write(f"Model ID and judge: {model_id} and {judge_model} \n")
-                    col_file.write(f"Scores from first judge {individual_run_metric_scores} \n")
-                    col_file.write(f"Metrics from first judge {metrics} \n")
-
-                if zero_rows_columns: #Only keeps tracks of missing values if there are any - NOT ACTIVATED YET
-                    unique_zero_rows_columns = len(set([x for sublist in list(zero_rows_columns.values()) for x in sublist]))
-                    print(colored(f"ERROR: Found missing values in {unique_zero_rows_columns} rows out of {len(results_df)}", 'red'))
-                    with open(f"missing_values_log_{model_parameter}.txt", "a", encoding='utf-8') as col_file:
-                        col_file.write(f"ERROR: Found missing values in {unique_zero_rows_columns} rows out of {len(results_df)}. These are the rows: {zero_rows_columns}, \
-                                    where the values of dict are the indices of the rows with missing values. Model is {model_name} and judge is {judge_model}\n")
-                    process_zero_values(results_df, zero_rows_columns, list_of_metrics, model_name) #Replace 0s with mean of non-zero values    
-                
-                #In each iteration we append the metrics (6 in total) of one resample for all questions - n at the end, one for each resample
-                #If there is an error, the metrics will be 0 (there will be n_errors*num_metrics less 'EvaluationResult' objects in that case)
-                all_resamples_metrics.append(metrics)
-
-                #Has n_resamples lists, each with num_metrics sublists (each sublist has scores over all questions of one metric) 
-                all_runs_metric_scores.append(individual_run_metric_scores)
-            
-            assert len(all_runs_metric_scores)==n_resamples, f"Number of all_runs_metric_scores not matching num_resamples. \
-                Got {len(all_runs_metric_scores)} all_runs_metric_scores but expected {n_resamples}"
+            assert len(globals()[f'all_runs_metric_scores_{judge_index+1}'])==n_resamples, f"Number of all_runs_metric_scores not matching num_resamples. \
+                Got {len(globals()[f'all_runs_metric_scores_{judge_index+1}'])} all_runs_metric_scores but expected {n_resamples} for judge {judge_model_name}"
             
             for i in range(n_resamples):
-                assert len(all_runs_metric_scores[i])==len(list_of_metrics), f"Number of all_runs_metric_scores[{i}] not matching num_metrics. \
-                    Got {len(all_runs_metric_scores[i])} all_runs_metric_scores[{i}] but expected {len(list_of_metrics)}"
-
-            # #A list with num resamples dicts, each having num metrics keys. Each key has num_questions values. - Information already in all_runs_metric_scores
-            # # example: [{'completeness_descr': [5, 5, 5, 3, 1], .....'general_descr': [5, 4, 5, 0, 2]}, {'completeness_descr': [5, 5, 5, 4, 1], .....}]
-            # with open('all_runs_metric_scores_main_'+str(model_parameter)+'.txt', 'w', encoding='utf-8') as f:
-            #     f.write(str(all_runs_metric_scores))
-
-            #A list with num_resamples sublists, each sublist having num_questions sublists. For each of those num_questions sublists,
-            #  each sub-sublist having num_metrics elements, each like the following:
-            #[EvaluationResult(key='completeness', score=3, value="To evaluate the completeness...
-            #for example, for 2 resamples, there would be 2 sublists, each with num_questions sublists. For each of those num_questions sublists, ...
-            with open('all_resamples_metrics_main_'+str(model_parameter)+"_"+str("_".join(judge_model.split('/')[1:]))+'.txt', 'w', encoding='utf-8') as f:
-                f.write(str(all_resamples_metrics))
-
-            assert len(all_resamples_metrics)==n_resamples, f"Number of all_resamples_metrics not matching num_resamples. \
-                Got {len(all_resamples_metrics)} all_resamples_metrics but expected {n_resamples}"
-            
-            for i in range(n_resamples): #Each one will have num_questions elements, each with num_metrics sublists (or 0 if error)
-                assert len(all_resamples_metrics[i])==len(list_of_questions), f"Number of all_resamples_metrics[{i}] not matching num_questions. \
-                    Got {len(all_resamples_metrics[i])} all_resamples_metrics[{i}] but expected {len(list_of_questions)}" 
-                    #Each all_ressamples_metrics[i] should have num_questions elements
-
-            # Calculate statistics - Only to keep track that everything works - Not used
-            metric_stats_resampling = calculate_metric_statistics(
-                all_runs_metric_scores, 
-                list_of_metrics, 
-                len(list_of_questions),
-                model_name,
-                judge_model
-            )
-            
-            # Save initial results
-            save_results(results_df, judge_model, model_id)
+                assert len(globals()[f'all_runs_metric_scores_{judge_index+1}'][i])==len(list_of_metrics), f"Number of all_runs_metric_scores[{i}] not matching num_metrics. \
+                    Got {len(globals()[f'all_runs_metric_scores_{judge_index+1}'][i])} all_runs_metric_scores[{i}] but expected {len(list_of_metrics)} \
+                        for judge {judge_model_name}"
 
 
-        #Second judge - Order of indices should be the same as for main judge
-            if judge_model_2:
-                judge_name = "_".join(judge_model_2.split('/')[1:])
-                with open(f"non_existing_cols_{judge_name}.txt", "a", encoding='utf-8') as f:
-                    f.write(f"Model used: {model_id}\n \n")
+            for judge_index,judge_model_name in enumerate(judge_model):
+                # Reorganize metrics - Has num_metrics keys, each with num_questions*num_resamples values (as a list)
+                metric_scores_all_resamples = reorganize_evaluation_metrics(results_df, list_of_metrics,  list_of_questions, n_resamples, judge_model_name)
 
-                filename_excel = (f"results_{'_'.join(judge_model.split('/')[1:])}_judge_with_"
-                        f"{model_id.replace('/','_')}.xlsx") 
-                
-                apply_second_judge(
-                    input_excel=filename_excel,
-                    list_of_metrics=list_of_metrics,  # e.g. ['completeness_descr', ...]
-                    num_resamples=n_resamples,  
-                    model_name=model_name,
-                    judge_model_2=judge_model_2 if judge_model_2 else judge_model,
-                    tool_usage=tool_usage
-                )
-
-                excel_path=(f"results_{'_'.join(judge_model_2.split('/')[1:])}_judge_with_"
-                        f"{model_id.replace('/','_')}.xlsx")
-
-                #A list with num of judges dicts, each with num of metrics keys and num of questions scores/prompts
-                all_runs_metric_scores_second_judge, all_run_metric_prompts_second_judge = process_metrics_second_judge( #all_run_metric_prompts_second_judge is not used
-                    excel_path, list_of_metrics, n_resamples, model_name=model_name, judge_model_2=judge_model_2 if judge_model_2 else judge_model)
-                
-                with open(f'all_runs_metric_scores_second_judge_{judge_name}.txt', 'w', encoding='utf-8') as f:
-                    f.write(str(all_runs_metric_scores_second_judge))
-                    f.write("\n \n")
-                    initial_all_runs_metric_scores_second_judge = all_runs_metric_scores_second_judge
-
-                for resample in range(n_resamples):
-                    for metric in all_runs_metric_scores_second_judge[resample]:
-                            all_runs_metric_scores_second_judge[resample][metric] = [0 if value is None or (isinstance(value, float) and np.isnan(value)) else value \
-                                                                                    for value in all_runs_metric_scores_second_judge[resample][metric]]
-
-                if initial_all_runs_metric_scores_second_judge != all_runs_metric_scores_second_judge:
-                    with open(f"all_runs_scores_second_judge_changed_{model_parameter}.txt", "a", encoding='utf-8') as log_file:
-                        log_file.write(f"changed_metrics:\n{all_runs_metric_scores_second_judge}\n\n")
-
-                calculate_metric_statistics(
-                            all_runs_metric_scores_second_judge, 
-                            list_of_metrics, 
-                            len(list_of_questions),
-                            model_name,
-                            judge_name
-                        )
-
-                with open(f"warning_{judge_name}.txt", "a", encoding='utf-8') as col_file: #For main questions this just notes model!
-                    col_file.write(f"\n \n Model used: {model_id} \n")
-                
-                # Get reorganized metrics
-                metric_scores_all_resamples_second_judge = reorganize_evaluation_metrics_second_judge(
-                    excel_path, list_of_metrics, n_resamples, judge_model_2=judge_model_2 if judge_model_2 else judge_model
-                )
-                
                 #A dict with num_metrics keys, each with num_questions*num_resamples values (as a list - first num_questions values are for first resample, 
                 # second num_questions values are for second resample, etc.)
-                with open('metric_scores_all_resamples_'+str(model_parameter)+'_judge_'+str(judge_name)+'.txt', 'w', encoding='utf-8') as f:
-                    f.write(str(metric_scores_all_resamples_second_judge))
+                judge_name_main = "_".join(judge_model_name.split('/')[1:])
+                with open('metric_scores_all_resamples_'+str(model_parameter)+"_judge_"+str(judge_name_main)+'.txt', 'w', encoding='utf-8') as f:
+                    f.write(str(metric_scores_all_resamples))
 
-                assert len(metric_scores_all_resamples_second_judge)==len(list_of_metrics), f"Number of metric_scores_all_resamples_second_judge not matching num_metrics. \
-                    Got {len(metric_scores_all_resamples_second_judge)} metric_scores_all_resamples_second_judge but expected {len(list_of_metrics)}"
+                assert len(metric_scores_all_resamples)==len(list_of_metrics), f"Number of metric_scores_all_resamples not matching num_metrics. \
+                    Got {len(metric_scores_all_resamples)} metric_scores_all_resamples but expected {len(list_of_metrics)}"
                 
                 for i in range(len(list_of_metrics)):
                     name_of_metric=list_of_metrics[i].replace('_descr','')
-                    assert len(metric_scores_all_resamples_second_judge[name_of_metric])==len(list_of_questions)*n_resamples, \
-                        f"Number of metric_scores_all_resamples_second_judge[{name_of_metric}] not matching \
-                        num_questions*num_resamples. Got {len(metric_scores_all_resamples_second_judge[name_of_metric])} \
-                        metric_scores_all_resamples_second_judge[{name_of_metric}] but expected {len(list_of_questions)*n_resamples}"
+                    assert len(metric_scores_all_resamples[name_of_metric])==len(list_of_questions)*n_resamples, f"Number of metric_scores_all_resamples[{name_of_metric}] \
+                        not matching num_questions*num_resamples. Got {len(metric_scores_all_resamples[name_of_metric])} metric_scores_all_resamples[{name_of_metric}] but \
+                        expected {len(list_of_questions)*n_resamples}"
 
-                metric_names_second_judge = list(metric_scores_all_resamples_second_judge.keys()) #Final list of metrics for plotting
+                metric_names = list(metric_scores_all_resamples.keys()) #Final list of metrics for plotting
+                
                 # Verify metric names
-                metrics_names_loop_second_judge = [metric.replace('_descr','') for metric in list_of_metrics]
-                assert metrics_names_loop_second_judge == metric_names_second_judge, "Metric names mismatch"
+                metrics_names_loop = [metric.replace('_descr','') for metric in list_of_metrics]
+                assert metrics_names_loop == metric_names, "Metric names mismatch"
                 
                 # Save results
-                all_runs_model_metrics_judge2[model_id] = all_runs_metric_scores_second_judge #Used in plotting metrics
+                globals()[f'all_runs_model_metrics_judge_{judge_index+1}'][model_id] = globals()[f'all_runs_metric_scores_{judge_index+1}'] #Used in plotting metrics
                 #Dictionary in format {model_id:[{metric_1_run_1:[values], metric_2_run_1:[values], ...}, {metric_1_run_2:[values]....}]
 
-                all_models_stats_judge2[model_id] = plot_figures_metrics(
-                    all_runs_model_metrics_judge2,
-                    metric_names_second_judge,
+                globals()[f'all_models_stats_judge_{judge_index+1}'][model_id] = plot_figures_metrics(
+                    globals()[f'all_runs_model_metrics_judge_{judge_index+1}'],
+                    metric_names,
                     model_id,
-                    judge_model_2
+                    judge_model_name
                 ) #Stats like mean, std, etc. per metric and per run over all questions
                 
                 # Save to files
+                judge_name = "_".join(judge_model_name.split('/')[1:])
                 with open(f'stats_{judge_name}.json', 'w') as f:
-                    json.dump(all_models_stats_judge2, f, indent=4)
+                    json.dump(globals()[f'all_models_stats_judge_{judge_index+1}'], f, indent=4)
                 with open(f'all_runs_model_metrics_{judge_name}.json', 'w') as f:
-                    json.dump(all_runs_model_metrics_judge2, f, indent=4)
-
-                print("Model",model_id,"saved with judge", judge_model_2)
-                print("Models saved so far:",list(all_models_stats_judge2.keys()))
-
-
-        #Continue with main judge below
-            # Reorganize metrics - Has num_metrics keys, each with num_questions*num_resamples values (as a list)
-            metric_scores_all_resamples = reorganize_evaluation_metrics(all_resamples_metrics, list_of_metrics, model_name, list_of_questions, n_resamples, judge_model)
-
-            #A dict with num_metrics keys, each with num_questions*num_resamples values (as a list - first num_questions values are for first resample, 
-            # second num_questions values are for second resample, etc.)
-            judge_name_main = "_".join(judge_model.split('/')[1:])
-            with open('metric_scores_all_resamples_'+str(model_parameter)+"_judge_"+str(judge_name_main)+'.txt', 'w', encoding='utf-8') as f:
-                f.write(str(metric_scores_all_resamples))
-
-            assert len(metric_scores_all_resamples)==len(list_of_metrics), f"Number of metric_scores_all_resamples not matching num_metrics. \
-                Got {len(metric_scores_all_resamples)} metric_scores_all_resamples but expected {len(list_of_metrics)}"
-            
-            for i in range(len(list_of_metrics)):
-                name_of_metric=list_of_metrics[i].replace('_descr','')
-                assert len(metric_scores_all_resamples[name_of_metric])==len(list_of_questions)*n_resamples, f"Number of metric_scores_all_resamples[{name_of_metric}] \
-                    not matching num_questions*num_resamples. Got {len(metric_scores_all_resamples[name_of_metric])} metric_scores_all_resamples[{name_of_metric}] but \
-                    expected {len(list_of_questions)*n_resamples}"
-
-            metric_names = list(metric_scores_all_resamples.keys()) #Final list of metrics for plotting
-            
-            # Verify metric names
-            metrics_names_loop = [metric.replace('_descr','') for metric in list_of_metrics]
-            assert metrics_names_loop == metric_names, "Metric names mismatch"
-            
-            # Save results
-            all_runs_model_metrics[model_id] = all_runs_metric_scores #Used in plotting metrics
-            #Dictionary in format {model_id:[{metric_1_run_1:[values], metric_2_run_1:[values], ...}, {metric_1_run_2:[values]....}]
-
-            all_models_stats[model_id] = plot_figures_metrics(
-                all_runs_model_metrics,
-                metric_names,
-                model_id,
-                judge_model
-            ) #Stats like mean, std, etc. per metric and per run over all questions
-            
-            # Save to files
-            judge_name = "_".join(judge_model.split('/')[1:])
-            with open(f'stats_{judge_name}.json', 'w') as f:
-                json.dump(all_models_stats, f, indent=4)
-            with open(f'all_runs_model_metrics_{judge_name}.json', 'w') as f:
-                json.dump(all_runs_model_metrics, f, indent=4)
+                    json.dump(globals()[f'all_runs_model_metrics_judge_{judge_index+1}'], f, indent=4)
 
             print("Model",model_id,"saved")
-            print("Models saved so far:",list(all_models_stats.keys()))
+            print("Models saved so far:",list(globals()[f'all_models_stats_judge_{judge_index+1}'].keys()))
                 
         except Exception as e:
             print("An error occurred in evaluating model",model_id)
@@ -855,83 +624,65 @@ def main():
     end_time = time.time()
     print(f"Total execution time: {(end_time - start_time) / 60:.2f} minutes")
 
-    aggregated_metrics=aggregate_metrics_by_model(all_runs_model_metrics)
-    print(aggregated_metrics)
-    aggregated_metrics_by_model_second_judge=aggregate_metrics_by_model(all_runs_model_metrics_judge2)
-    print(aggregated_metrics_by_model_second_judge)
+    for judge_index,judge_model_name in enumerate(judge_model):
 
-    print_aggregated_metrics(aggregated_metrics, judge_model)
-    print_aggregated_metrics(aggregated_metrics_by_model_second_judge, judge_model_2)
+        aggregated_metrics=aggregate_metrics_by_model(globals()[f'all_runs_model_metrics_judge_{judge_index+1}'])
+        print("Judge name for aggregated metrics:",judge_model_name)
+        print("Aggregated metrics:",aggregated_metrics)
+        print("for this judge, All runs model metrics:",globals()[f'all_runs_model_metrics_judge_{judge_index+1}'])
 
-    list_of_metric_names=[name.removesuffix('_descr') for name in list_of_metrics]
+        print_aggregated_metrics(aggregated_metrics, judge_model_name)
 
-    model_names, metric_means, metric_stds=calculate_model_metrics(list_of_metric_names, aggregated_metrics)
-    model_names_second_judge, metric_means_second_judge, metric_stds_second_judge=calculate_model_metrics(list_of_metric_names, aggregated_metrics_by_model_second_judge)
+        list_of_metric_names=[name.removesuffix('_descr') for name in list_of_metrics]
 
-    plot_model_comparison(model_names, list_of_metric_names, metric_means, metric_stds, save_prefix="_".join(judge_model.split('/')[1:]))
-    plot_model_comparison(model_names_second_judge, list_of_metric_names, metric_means_second_judge, metric_stds_second_judge, save_prefix="_".join(judge_model_2.split('/')[1:]))
-    plot_spider_chart(model_names, list_of_metric_names, metric_means, save_prefix="_".join(judge_model.split('/')[1:]))
-    plot_spider_chart(model_names_second_judge, list_of_metric_names, metric_means_second_judge, save_prefix="_".join(judge_model_2.split('/')[1:]))
+        model_names, metric_means, metric_stds=calculate_model_metrics(list_of_metric_names, aggregated_metrics)
 
-    comparison_results = compare_model_performances(all_runs_model_metrics, judge_model) 
-    # Save results to file
-    with open('comparison_result_'+"_".join(judge_model.split('/')[1:])+".json", 'w') as f:
-        # Convert numpy types to native Python types for JSON serialization
-        def convert_to_serializable(obj):
-            if isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
-                np.int16, np.int32, np.int64, np.uint8,
-                np.uint16, np.uint32, np.uint64)):
-                return int(obj)
-            elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
-                return float(obj)
-            elif isinstance(obj, (np.bool_)):
-                return bool(obj)
-            elif isinstance(obj, (np.ndarray,)):
-                return obj.tolist()
-            elif obj is None:
-                return None
-            return obj
-        
-        serializable_results = json.loads(
-            json.dumps(comparison_results, default=convert_to_serializable)
-        )
-        json.dump(serializable_results, f, indent=4)
+        plot_model_comparison(model_names, list_of_metric_names, metric_means, metric_stds, save_prefix="_".join(judge_model_name.split('/')[1:]))
+        plot_spider_chart(model_names, list_of_metric_names, metric_means, save_prefix="_".join(judge_model_name.split('/')[1:]))
 
-    comparison_results_second_judge = compare_model_performances(all_runs_model_metrics_judge2, judge_model_2)
+        comparison_results = compare_model_performances(globals()[f'all_runs_model_metrics_judge_{judge_index+1}'], judge_model_name) 
 
-    # Save results to file
-    with open('comparison_result_'+'_'.join(judge_model_2.split('/')[1:])+'.json', 'w') as f:
-        serializable_results_second_judge = json.loads(
-            json.dumps(comparison_results_second_judge, default=convert_to_serializable)
-        )
-        json.dump(serializable_results_second_judge, f, indent=4)
+        # Save results to file
+        with open('comparison_result_'+"_".join(judge_model_name.split('/')[1:])+".json", 'w') as f:
+            # Convert numpy types to native Python types for JSON serialization
+            def convert_to_serializable(obj):
+                if isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
+                    np.int16, np.int32, np.int64, np.uint8,
+                    np.uint16, np.uint32, np.uint64)):
+                    return int(obj)
+                elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+                    return float(obj)
+                elif isinstance(obj, (np.bool_)):
+                    return bool(obj)
+                elif isinstance(obj, (np.ndarray,)):
+                    return obj.tolist()
+                elif obj is None:
+                    return None
+                return obj
+            
+            serializable_results = json.loads(
+                json.dumps(comparison_results, default=convert_to_serializable)
+            )
+            json.dump(serializable_results, f, indent=4)
 
-    plot_and_save_model_comparisons(comparison_results, list_of_metrics, "_".join(judge_model.split('/')[1:]))
-    plot_and_save_model_comparisons(comparison_results_second_judge, list_of_metrics, "_".join(judge_model_2.split('/')[1:]))
+        plot_and_save_model_comparisons(comparison_results, list_of_metrics, "_".join(judge_model_name.split('/')[1:]))
 
-    # Create and print the table
-    metrics = [m.replace('_descr', '') for m in list_of_metrics]
-    comparison_table = create_comparison_table(comparison_results, metrics)
-    print(comparison_table)
+        # Create and print the table
+        metrics = [m.replace('_descr', '') for m in list_of_metrics]
+        comparison_table = create_comparison_table(comparison_results, metrics)
+        print(comparison_table)
 
-    # Save table to file
-    with open('comparison_table_'+'_'.join(judge_model.split('/')[1:])+'.txt', 'w') as f:
-        f.write(comparison_table)
+        # Save table to file
+        with open('comparison_table_'+'_'.join(judge_model_name.split('/')[1:])+'.txt', 'w') as f:
+            f.write(comparison_table)
 
-    comparison_table_second_judge = create_comparison_table(comparison_results_second_judge, metrics)
-    print(comparison_table_second_judge)
+        add_id_and_origin_file_columns('.', excel_file_name)
 
-    # Save table to file
-    with open('comparison_table_'+'_'.join(judge_model_2.split('/')[1:])+'.txt', 'w') as f:
-        f.write(comparison_table_second_judge)
-
+    create_performance_plots('.', judge_model)
+    
     # First, determine required sample size
     required_samples = perform_power_analysis(effect_size=0.1254, alpha=0.05, power=0.8)  #These parameters result in a sample size of 1000
     print(f"Required samples per model for statistical power: {required_samples}")
-
-    add_id_and_origin_file_columns('.', excel_file_name)
-
-    create_performance_plots('.', judge_model_2=judge_model_2)
 
 if __name__ == "__main__":
     main() 

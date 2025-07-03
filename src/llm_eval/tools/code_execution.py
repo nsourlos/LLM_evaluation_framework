@@ -10,12 +10,11 @@ from e2b_code_interpreter import Sandbox
 import sys
 
 from ..config import (
-    judge_model, generate_max_tokens, use_smolagents, excel_file_name,
+    generate_max_tokens, use_smolagents, excel_file_name,
     openai_api_key, gemini_api_key, together_api_key, groq_api_key, anthropic_api_key, open_router_api_key, hf_token, e2b_api_key
 )
 
-from ..providers.api_handlers import get_model_response
-from ..utils.paths import (get_file_paths)
+from ..utils.paths import get_file_paths
 
 base_path, file_path, custom_cache_dir, venv_path, venv_name = get_file_paths(excel_file_name, base_path=None)
 
@@ -38,7 +37,7 @@ def run_python_script(python_file, base_path=base_path, venv_path=venv_path, ven
         return bash_command, process
 
 def handle_code_extraction(code_result, model_name, user_question, 
-                           use_smolagents=use_smolagents, judge_model=judge_model, generate_max_tokens=generate_max_tokens, openai_api_key=openai_api_key):
+                           use_smolagents=use_smolagents, judge_model='openai/gpt-4o-mini', generate_max_tokens=generate_max_tokens, openai_api_key=openai_api_key):
     """ 
     Handle code extraction and execution.
 
@@ -211,10 +210,9 @@ def handle_code_extraction(code_result, model_name, user_question,
                     error_messages = [{"role": "user", "content": error_prompt}]                 
                     try:
                         # Get corrected code
-                        import openai
-                        from langsmith.wrappers import wrap_openai
-                        
-                        openai_client = wrap_openai(openai.Client(api_key=openai_api_key))
+                        from openai import OpenAI
+                        openai_client = OpenAI(api_key=openai_api_key)
+
                         response = openai_client.chat.completions.create(
                             messages=error_messages, 
                             temperature=0, 
@@ -315,7 +313,7 @@ def handle_code_extraction(code_result, model_name, user_question,
 
             return None, None
 
-def text_for_simulation(response, model_name, judge_model=judge_model, generate_max_tokens=generate_max_tokens, openai_api_key=openai_api_key):
+def text_for_simulation(response, model_name, judge_model='openai/gpt-4o-mini', generate_max_tokens=generate_max_tokens, openai_api_key=openai_api_key):
 
     """
     Handle simulation execution with the provided INP file content.
@@ -436,10 +434,9 @@ def text_for_simulation(response, model_name, judge_model=judge_model, generate_
                 
                 try:
                     # Get corrected INP file content
-                    import openai
-                    from langsmith.wrappers import wrap_openai
-                    
-                    openai_client = wrap_openai(openai.Client(api_key=openai_api_key))
+                    from openai import OpenAI
+                    openai_client = OpenAI(api_key=openai_api_key)
+
                     response = openai_client.chat.completions.create(
                         messages=error_messages, 
                         temperature=0, 

@@ -2,16 +2,14 @@
 Tool usage decision function
 """
 
-from ..config import (
-   judge_model, openai_api_key
-)
+from ..config import openai_api_key
 
 tool_definitions = [
-    {
+    { 
         "type": "function",
         "function": {
             "name": "extract_code",
-            "description": "Use this tool whenever a user asks to write code but not when they just ask for a calculation. Do not use it for INP/EPANET file creation.",
+            "description": "Use this tool whenever a user asks to solve a problem by writing/using code. Do not use it for INP/EPANET file creation.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -29,7 +27,7 @@ tool_definitions = [
         "type": "function",
         "function": {
             "name": "run_simulation",
-            "description": "Use this tool whether a INP/EPANET file needs to be created and/or a simulation should be run. Do not use it when asked to write code.",
+            "description": "Use this tool when a INP or EPANET file needs to be created and/or a simulation should be run. Do not use it when asked to write code.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -86,7 +84,7 @@ tool_definitions = [
 
 ]
 
-def decide_tool_usage(query, tools=tool_definitions, judge_model=judge_model, openai_api_key=openai_api_key):
+def decide_tool_usage(query, tools=tool_definitions, judge_model='openai/gpt-4o-mini', openai_api_key=openai_api_key):
     """Decide if a tool should be used based on the query, and if yes, output the tool name(s)."""
 
     # Construct prompt for the judge
@@ -106,7 +104,7 @@ def decide_tool_usage(query, tools=tool_definitions, judge_model=judge_model, op
         Available Tools:
         {tool_descriptions}
 
-        Should a tool be used for answering the question? If yes, specify the tool name(s). Respond with 'No' or the tool name(s).
+        Should a tool be used for answering the question? If yes, just specify the tool name(s). If no, just respond with 'No' and nothing else. 
     """
     
     messages = [
@@ -115,9 +113,8 @@ def decide_tool_usage(query, tools=tool_definitions, judge_model=judge_model, op
     ]
     
     # Use OpenAI to judge tool usage
-    import openai
-    from langsmith.wrappers import wrap_openai
-    client = wrap_openai(openai.Client(api_key=openai_api_key))
+    from openai import OpenAI
+    client = OpenAI(api_key=openai_api_key)
     
     response = client.chat.completions.create(
         messages=messages,
@@ -128,6 +125,12 @@ def decide_tool_usage(query, tools=tool_definitions, judge_model=judge_model, op
     
     tool_decision = response.choices[0].message.content.strip()
     print("Tool Decision:", tool_decision)
+    with open(f"tool_usage_log.txt", "a") as log:
+        log.write(f"Tool Decision: {tool_decision} \n")
+        log.write("messages are: \n")
+        for message in messages:
+            log.write(f"{message['role']}: {message['content']} \n")
+        log.write("******************\n\n")
     
     if tool_decision.lower() == 'no':
         return ['no_tool_needed'] #None

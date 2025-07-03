@@ -9,14 +9,12 @@ reranker_model_name="BAAI/bge-reranker-base"
 #Model to generate responses to questions - If we restart session, comment out the models that have already been run
 models=[  #Example of models tested
     # "together/Qwen/Qwen3-235B-A22B-fp8-tput",
-    'together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
+    # 'together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
     # "together/deepseek-ai/DeepSeek-V3", #non-reasoning model
     # "openai/o3-2025-04-16", #200K context length, 100K output tokens
     # "openai/o4-mini", #200K context length, 100K output tokens
-    # "together/deepseek-ai/DeepSeek-R1", #164K context length
+    "together/deepseek-ai/DeepSeek-R1", #164K context length
     # "openai/gpt-4o-2024-08-06",
-
-    # "huggingface/meta-llama/Llama-3.2-1B-Instruct", #Just for testing
 
     'openai/gpt-4o-mini', #Costs very low ~0.01$ for 9 Q&A pairs.
     # "huggingface/Qwen/Qwen2.5-7B-Instruct",
@@ -59,8 +57,8 @@ models=[  #Example of models tested
 #Large models take more time (2min/generation for Mistral 12B)
 
 #Define model to act as a judge - Only possible to use openai, gemini, and together models for now and not thinking models
-judge_model='openai/gpt-4o-mini'
-judge_model_2='together/deepseek-ai/DeepSeek-V3'
+judge_model=['openai/gpt-4o-mini', 'together/deepseek-ai/DeepSeek-V3'] #A list of models to judge the results
+#At the end, we are interested in the 'final_...results.xlsx' with the final judge on this list on the file name
 commercial_api_providers=['openai','groq_website','anthropic','together', 'openrouter', 'gemini'] #Used to distinguish commercial and Hugging Face models
 max_output_tokens=1000 #Define maximum number of tokes in the judge LLM output
 
@@ -68,8 +66,9 @@ max_output_tokens=1000 #Define maximum number of tokes in the judge LLM output
 generate_max_tokens=2000
 generation_max_tokens_thinking=16000 #This is the output generation tokens - We have to make sure that this along with input tokens not exceed context length
 domain="Water" #Domain - 'Water' Engineering or anything else
-inference_on_whole_dataset=True #Inference on whole dataset? - Not of use for now, maybe in the future if we want to use only part of it
 n_resamples=2 #Number of times to resample the dataset - 4 reduces the variance to 50%
+continue_from_resample=0 #If we want to continue from a certain resample, we can specify it here - 0 means start from the beginning (1st resample), 1 means 2nd resample, etc. 
+# We cannot replace already existing column - this number should be set for columns that do not exist yet
 tool_usage=False #Decide if in our dataset we want to enable tool usage to answer questions
 use_RAG=False # Define the RAG model - True or False - Current implementation just fit most similar Q&As as input from excel - most models fail even if response in context!
 use_smolagents=False #Use smolagents for code execution - True or False (if true, tool_usage has to be True)

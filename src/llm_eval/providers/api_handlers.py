@@ -11,10 +11,8 @@ from ..core.model_utils import get_model
 def call_openai_api(messages, model_name, generate_max_tokens, openai_api_key=openai_api_key):
     """Call OpenAI API"""
     try:
-        import openai
-        from langsmith.wrappers import wrap_openai
-        
-        openai_client = wrap_openai(openai.Client(api_key=openai_api_key))
+        from openai import OpenAI
+        openai_client = OpenAI(api_key=openai_api_key)
         
         if '/o1' not in model_name and '/o3' not in model_name and '/o4' not in model_name:
             response = openai_client.chat.completions.create(

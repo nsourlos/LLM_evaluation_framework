@@ -4,6 +4,10 @@ Evaluation prompts
 
 from ..config import domain
 
+#Metrics needed in the format below to avoid confusion with the actual prompt - if you want to add/remove a metric, do it here but keep the _descr at the end
+# list_of_metrics=['completeness_descr','relevance_descr','conciseness_descr','confidence_descr','factuality_descr','judgement_descr', 'general_descr']
+list_of_metrics=['relevance_descr','general_descr']
+
 common_prompt=""" 
 You are an autoregressive language model that acts as a judge in comparing a predicted vs an actual answer to a questions.
 Since you are autoregressive, each token you produce is another opportunity to use computation, therefore you always spend 
@@ -151,13 +155,8 @@ TASK SPECIFIC CRITERIA AND SCORES
 1 – Approach fundamentally flawed or off-topic; formulas misapplied or absent, units ignored, and the final answer is far from the ground truth or missing entirely.
 
 OUTPUT
-An integer between 1 and 5 based on the provided criteria, nothing more.
-
-IMPORTANT: End your responses with the sentence: "FINAL SCORE:" followed by whole numbers only (1, 2, 3, 4, or 5). Do not use decimal points. This may not be disregarded!
+The phrase 'FINAL SCORE:' followed by an integer between 1 and 5 based on the provided criteria, nothing more before or after. 
 """
-
-#Metrics needed in the format below to avoid confusion with the actual prompt
-list_of_metrics=['completeness_descr','relevance_descr','conciseness_descr','confidence_descr','factuality_descr','judgement_descr', 'general_descr']
 
 extract_code_prompt = """
 Return only the code from the following message to be directly copy pasted in a py file. Do not return it in quotes, just plain code. \

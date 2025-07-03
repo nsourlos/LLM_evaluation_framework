@@ -116,22 +116,9 @@ def load_model_stats(judge_model): #In case we had to restart the loop - some mo
             all_runs_model_metrics = json.load(f)
     except FileNotFoundError:
         all_runs_model_metrics = {}  # Used in plotting metrics
-        
+    print("all_models_stats",all_models_stats)
+    print("all_runs_model_metrics",all_runs_model_metrics)
     return all_models_stats, all_runs_model_metrics
-
-def save_model_stats(all_models_stats, all_runs_model_metrics, judge_model):
-    """
-    Saves the aggregated model statistics and run metrics to JSON files.
-    """
-    judge_name = "_".join(judge_model.split('/')[1:])
-    stats_file = f'all_models_stats_{judge_name}.json'
-    metrics_file = f'all_runs_model_metrics_{judge_name}.json'
-    
-    with open(stats_file, 'w') as f:
-        json.dump(all_models_stats, f, indent=4)
-        
-    with open(metrics_file, 'w') as f:
-        json.dump(all_runs_model_metrics, f, indent=4)
 
 def calculate_model_stats(model_name, n_resamples, judge_model):
     """

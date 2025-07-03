@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
 [![Maintenance](https://img.shields.io/maintenance/yes/2025)](https://github.com/nsourlos/semi-automated_installation_exe_msi_files-Windows_10)
 
-A Python-based framework for evaluating Large Language Models (LLMs), converted from the [`llm_evaluate.ipynb`](notebooks/llm_evaluate.ipynb) notebook. Based on [Anthropic's research paper](https://arxiv.org/pdf/2411.00640) and using the [DRACO AI dataset](https://huggingface.co/datasets/draco-ai/trial01).
+A Python-based framework for evaluating Large Language Models (LLMs) based on [Anthropic's research paper](https://arxiv.org/pdf/2411.00640) and using the [DRACO AI dataset](https://huggingface.co/datasets/draco-ai/trial01).
 
 ## 📋 Table of Contents
 - [Quick Start](#🚀-quick-start)
@@ -93,7 +93,6 @@ GROQ_API_KEY="your_groq_api_key"
 ANTHROPIC_API_KEYO="your_anthropic_api_key"
 HF_TOKEN="your_huggingface_token"
 OPEN_ROUTER_API_KEY="your_openrouter_api_key"
-LANGSMITH_API_KEY="your_langchain_api_key"
 ```
 
 ### 📂 Path Configuration
@@ -103,14 +102,20 @@ Edit [`src/llm_eval/utils/paths.py`](src/llm_eval/utils/paths.py) to set your sy
 ### ⚡ Parameters Configuration
 Edit [`src/llm_eval/config.py`](src/llm_eval/config.py) to configure:
 - `excel_file_name`: Your dataset Excel file
-- `models`: List of models to evaluate
 - `embedding_model`: Model for RAG embeddings
 - `reranker_model_name`: Model for reranking
-- `tool_usage`: Enable/disable tool usage
-- `use_RAG`: Enable/disable RAG
-- `use_smolagents`: Enable/disable SmolAgents
-- `n_resamples`: Number of resampling iterations
-- `inference_on_whole_dataset`: Run on full dataset (leave it to default True)
+- `models`: List of models to evaluate (e.g. OpenAI, Together, Gemini models)
+- `judge_model`: Models used to judge the results
+- `commercial_api_providers`: Use to distinguish commercial and HuggingFace models
+- `max_output_tokens`: Maximum tokens in judge LLM output
+- `generate_max_tokens`: Token limit for regular model responses
+- `generation_max_tokens_thinking`: Token limit for reasoning model responses
+- `domain`: Domain of evaluation (e.g. "Water" Engineering)
+- `n_resamples`: Number of times to resample the dataset
+- `continue_from_resample`: Which resample iteration to continue from
+- `tool_usage`: Enable/disable tool usage for answering questions
+- `use_RAG`: Enable/disable RAG (Retrieval Augmented Generation)
+- `use_smolagents`: Enable/disable SmolAgents for code execution
 
 ---
 
@@ -133,6 +138,7 @@ Additional columns may be added:
 1. **Configure parameters:**
    - Set up your environment variables in [`env_example`](env_example) and rename it to `env`
    - Configure paths in [`src/llm_eval/utils/paths.py`](src/llm_eval/utils/paths.py)
+   - Modify prompts and list of metrics in [`src/llm_eval/evaluation/prompts.py`](src/llm_eval/evaluation/prompts.py)
    - Adjust parameters in [`src/llm_eval/config.py`](src/llm_eval/config.py)
 
 2. **Run the evaluation:**
@@ -147,11 +153,6 @@ The script will:
 - Generate Excel results files
 - Create JSON files for statistics
 - Produce visualization plots
-
-**Important**: When re-evaluating a model, it's recommended to delete its previous run from Langsmith first. 
-For large datasets containing many question-answer pairs, we suggest evaluating models 
-sequentially - run the script one time for each model to ensure smooth execution. 
-Everytime, it will continue adding more models to the generated plots.
 
 ---
 
@@ -181,7 +182,6 @@ llm_evaluation_framework/
 │           ├── scoring.py          # Scoring utilities
 │           └── statistics.py       # Statistical calculations
 ├── notebooks/
-│   ├── llm_evaluate.ipynb               # Notebook with the full code
 │   └── convert_DRACO_to_excel.ipynb     # Create Excel file from json files with question-answer pairs
 ├── data/
 │   ├── requirements_code_execution.txt  # Dependencies for code execution environment
@@ -239,14 +239,14 @@ When making changes:
 
 ## ✅ To-Do
 
-- [ ] Remove Langsmith
+- [x] Remove Langsmith
 - [ ] Replace txt saves with logging
 
 ---
 
 ## 🔧 Troubleshooting
 
-All operations are logged in txt files to track errors. To modify list of metrics to be evaluated, change the list_of_metrics in [prompts.py](src/llm_eval/evaluation/prompts.py), and comment out the non-needed ones in the factor_evaluator function in [evaluator.py](src/llm_eval/evaluation/evaluator.py)
+All operations are logged in txt files to track errors. To modify list of metrics to be evaluated, change the list_of_metrics in [prompts.py](src/llm_eval/evaluation/prompts.py)
 
 ---
 
